@@ -73,22 +73,28 @@ impl Scheduler {
         let block_end = start_frame.saturating_add(frames as u64);
         for note in &self.notes {
             if note.start_frame >= start_frame && note.start_frame < block_end {
-                events.push(NoteEvent {
-                    target: note.target,
-                    frame: (note.start_frame - start_frame) as u32,
-                    kind: NoteEventKind::On,
-                    pitch: note.pitch,
-                    velocity: note.velocity,
-                });
+                push_event(
+                    events,
+                    NoteEvent {
+                        target: note.target,
+                        frame: (note.start_frame - start_frame) as u32,
+                        kind: NoteEventKind::On,
+                        pitch: note.pitch,
+                        velocity: note.velocity,
+                    },
+                );
             }
             if note.end_frame >= start_frame && note.end_frame < block_end {
-                events.push(NoteEvent {
-                    target: note.target,
-                    frame: (note.end_frame - start_frame) as u32,
-                    kind: NoteEventKind::Off,
-                    pitch: note.pitch,
-                    velocity: 0,
-                });
+                push_event(
+                    events,
+                    NoteEvent {
+                        target: note.target,
+                        frame: (note.end_frame - start_frame) as u32,
+                        kind: NoteEventKind::Off,
+                        pitch: note.pitch,
+                        velocity: 0,
+                    },
+                );
             }
         }
         events.sort_unstable_by_key(|event| {
@@ -100,6 +106,12 @@ impl Scheduler {
                 event.velocity,
             )
         });
+    }
+}
+
+fn push_event(events: &mut Vec<NoteEvent>, event: NoteEvent) {
+    if events.len() < events.capacity() || events.capacity() == 0 {
+        events.push(event);
     }
 }
 
@@ -208,5 +220,18 @@ mod tests {
 
         scheduler.events_for_block(50_000, 1_000, &mut events);
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn preallocated_event_buffers_do_not_grow() {
+        let scheduler = Scheduler::new(&project()).unwrap();
+        let mut capped = Vec::with_capacity(1);
+        scheduler.events_for_block(23_900, 200, &mut capped);
+        assert_eq!(capped.len(), 1);
+        assert_eq!(capped.capacity(), 1);
+
+        let mut offline = Vec::new();
+        scheduler.events_for_block(23_900, 200, &mut offline);
+        assert_eq!(offline.len(), 2);
     }
 }

@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 odaw-core = { path = "../core" }
+rtrb.workspace = true
 thiserror.workspace = true
 
 [lints]

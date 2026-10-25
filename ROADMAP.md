@@ -15,7 +15,7 @@ depend on the render-plan and parameter contracts.
 | --- | --- | --- |
 | M0 Foundation | 0 | Green workspace, core data, versioned container. **Done.** |
 | M1 Control core | 1 | Commands, transactions, undo, operators, selection. **Done.** |
-| M2 First sound | 2-3 | Deterministic offline WAV. **Offline done; realtime next.** |
+| M2 First sound | 2-3 | Deterministic offline WAV and realtime playback. **Done.** |
 | M3 Arrangement and headless product | 4-5 | Sections, loops, usable CLI. |
 | M4 UI shell and track selection | 6 | Native window, transport, track list, timeline. |
 | M5 Piano roll | 6-7 | MIDI editing and sample-accurate playback. |
@@ -89,15 +89,17 @@ Acceptance:
 
 Implemented in this commit: rack flattening, deterministic DAG ordering, cycle
 and channel checks, the parameter buffer, the block executor, primitive
-sine/poly/gain/pass devices, inline MIDI notes, the note scheduler, offline WAV
-rendering, block-size-independence tests, and `odaw demo` / `odaw render`.
+sine/poly/gain/pass devices, inline MIDI notes, the note scheduler, deterministic
+offline WAV rendering, `cpal` realtime playback, lock-free engine handoff,
+block-size-independence tests, and `odaw demo` / `odaw render` / `odaw play`.
 
 Remaining in M2:
 
 - latency compensation and delay nodes (non-zero latency is rejected for now);
 - devices used outside a rack or in parallel/sidechain device paths;
-- realtime `cpal` playback and atomic plan handoff;
+- the master sample-rate bridge for devices that cannot run at the project rate;
 - incremental recompile and parameter updates on a live engine;
+- a general feedback queue for meters/transport beyond position and finished;
 - golden WAV fixtures in CI.
 
 ## M3 — Arrangement and headless product
@@ -217,12 +219,12 @@ move ahead of CLAP, but the device interface must not fork.
 
 ## Immediate next steps after this commit
 
-1. Commit this tree as the MIDI-note commit.
-2. Add realtime `cpal` playback and atomic plan handoff, reusing the offline
-   engine and scheduler.
-3. Add the UI shell with track selection.
-4. Build the piano-roll editor on top of the existing notes, commands, selection,
+1. Commit this tree as the realtime-playback commit.
+2. Add the UI shell with transport, track list, timeline, and track selection.
+3. Build the piano-roll editor on top of the existing notes, commands, selection,
    scheduler, and poly instrument.
+4. Add arrangement/loop playback using the realtime transport.
 5. Add the versioned command-log DTOs and operation log.
 6. Add automation editing, CLAP, then VST3.
-7. Add latency compensation and support for parallel/sidechain device paths.
+7. Add latency compensation, the master rate bridge, and support for
+   parallel/sidechain device paths.

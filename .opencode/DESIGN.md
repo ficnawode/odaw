@@ -481,9 +481,10 @@ concrete types are illustrative unless a boundary depends on them.
 - `[CONFIRMED]` Parallel execution only runs nodes proven independent in the
   DAG, and a node sums its inputs in a fixed, declared order, so parallel
   output equals serial output.
-- `[CONFIRMED]` The `RenderPlan` crosses to the render side by an atomic
-  pointer handoff. The audio thread never locks or frees; the control thread
-  destroys the outgoing plan after render-side readers release it.
+- `[CONFIRMED]` Render-side state crosses to the audio thread as owned state
+  over bounded lock-free queues. The audio thread swaps state only at block
+  boundaries and never locks, allocates, or frees; outgoing state returns on
+  another queue and is destroyed by the control thread.
 - `[CONFIRMED]` The realtime side never allocates, locks, does I/O, parses
   text, or calls scripts. Enforced in CI.
 - `[CONFIRMED]` Assets are content-addressed by hash and embedded in the
@@ -745,14 +746,13 @@ Rules:
 
 - The document world never runs on the audio thread.
 - The render world never allocates, locks, does I/O, or calls scripts.
-- The only object that crosses document -> render is the immutable
-  `RenderPlan`, plus parameter values written into a lock-free buffer.
-- The `RenderPlan` is handed over as a whole, by an atomic pointer swap
-  (`arc-swap` style). The audio thread only loads the pointer; it never
-  locks, waits, or frees. The control thread publishes the new plan, keeps a
-  reference to the outgoing one, waits out all render-side readers, then
-  drops its own reference, so destruction always happens on the control
-  thread.
+- The only objects that cross document -> render are owned render-side state
+  (plan, live device instances, parameter snapshot) and parameter values on a
+  lock-free command queue.
+- Render-side state is handed over as a whole over a bounded lock-free queue.
+  The audio thread swaps it at a block boundary; it never locks, waits,
+  allocates, or frees. The outgoing state is returned on a second queue and is
+  destroyed by the control thread.
 - Asset blobs live in the `AssetStore` outside the immutable `Project`;
   snapshots reference them by `AssetId`. Eviction must not free a blob that
   a live snapshot still references. See section 2.10.
@@ -760,11 +760,12 @@ Rules:
   instance. The control side builds and prepares replacement instances off
   the audio thread; a live instance is only touched on the audio thread, at
   the handoff point, where the outgoing instance is retired.
-- The only thing that crosses render -> document is messages on a
-  lock-free queue (transport position, meters, events).
+- The only things that cross render -> document are lock-free feedback
+  (transport position and finished state) and messages on a lock-free queue
+  (meters, events).
 - Value commands update both the document (for undo) and the parameter
-  buffer (for realtime). The parameter buffer is owned by the render side
-  and only written by the document side through the stable slot map.
+  buffer (for realtime). Parameter values reach the render side through the
+  same lock-free command queue and are applied to stable slots.
 
 Ownership summary:
 
@@ -772,8 +773,8 @@ Ownership summary:
 | --- | --- | --- |
 | `Project` | `Session` | project |
 | `History` | `Session` | project |
-| `RenderPlan` | `Engine` (atomic slot), built by `Session` | replaced on rebuild |
-| `param_buffer` | `Engine` (render side), written by `Session` | application |
+| `RenderPlan` | `Engine` (current realtime state, built by control) | replaced on rebuild |
+| `param_buffer` | `Engine` (render side), updated from control over a lock-free queue | application |
 | `Transport` | `Engine` | application |
 | `AssetStore` | `Session` | project |
 | `AudioBackend`, `Window` | app | application |
@@ -836,6 +837,11 @@ Resolved (items already stated in section 3 are not repeated):
 12. `[CONFIRMED]` MIDI notes are inline in the clip and carry `NoteId`s.
     Project format v2 encodes them; v1 containers migrate with empty note
     lists. See section 4.3.
+13. `[CONFIRMED]` Realtime engine handoff uses bounded SPSC ring buffers of
+    owned render state. The audio thread swaps at block boundaries and returns
+    old state on a retirement queue; it never allocates, locks, or frees.
+    Parameter updates and transport commands use the same lock-free command
+    queue.
 
 Still open:
 

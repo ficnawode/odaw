@@ -1,15 +1,20 @@
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::num::NonZeroU32;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use odaw_compile::{CompileError, Compiler};
 use odaw_control::{RenameProject, Session, SessionError};
 use odaw_core::{NodeRole, Project, ProjectError, TempoError, Tick};
 use odaw_dsp::demo;
+use odaw_engine::{RealtimeEngine, RealtimeError, RealtimeState, RealtimeStateError, realtime};
 use odaw_format::{Container, ContainerError, ProjectFile};
 use odaw_io::{WavError, WavSpec, write_wav};
+use odaw_platform::{AudioBackend, AudioCallback, AudioError};
 use odaw_render::{RenderError, RenderOptions, render_project};
 use thiserror::Error;
 
@@ -63,6 +68,13 @@ enum Command {
         #[arg(long, allow_hyphen_values = true)]
         duration: Option<f64>,
     },
+    /// Play a project through the default audio output device.
+    Play {
+        path: PathBuf,
+        /// Play length in seconds. Defaults to the project's loop or clip end.
+        #[arg(long, allow_hyphen_values = true)]
+        duration: Option<f64>,
+    },
     /// Check that a project container loads and validates.
     Validate { path: PathBuf },
 }
@@ -95,6 +107,7 @@ fn run() -> Result<(), CliError> {
             block_size,
             duration,
         } => render_project_file(&path, &output, block_size, duration),
+        Command::Play { path, duration } => play_project(&path, duration),
         Command::Validate { path } => validate_project(&path),
     }
 }
@@ -175,6 +188,46 @@ fn create_demo(path: &Path, force: bool) -> Result<(), CliError> {
     let project = demo::project();
     Container::new(path).save(&project)?;
     println!("created demo {}", path.display());
+    Ok(())
+}
+
+struct Player {
+    engine: RealtimeEngine,
+}
+
+impl AudioCallback for Player {
+    fn process(&mut self, output: &mut [f32], channels: usize, sample_rate: u32) {
+        self.engine.process(output, channels, sample_rate);
+    }
+}
+
+fn play_project(path: &Path, duration: Option<f64>) -> Result<(), CliError> {
+    let project = Container::new(path).load()?;
+    let frames = render_frames(&project, duration)?;
+    let compiled = Compiler::builtin().compile(&project)?;
+    let sample_rate = compiled.plan.sample_rate;
+    let channels = u16::try_from(compiled.plan.channels)
+        .map_err(|_| CliError::UnsupportedChannels(compiled.plan.channels))?;
+    let block_size = NonZeroUsize::new(8192).expect("the realtime block size is non-zero");
+    let state = RealtimeState::new(compiled, &project, block_size, Some(frames))?;
+    let (engine, mut handle) = realtime(state, 8);
+    handle.play()?;
+    let backend = AudioBackend::start(Player { engine }, sample_rate, channels)?;
+
+    while !handle.finished() {
+        if !backend.is_healthy() {
+            return Err(CliError::AudioStreamFailed);
+        }
+        handle.collect_retired();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    println!(
+        "played {} frames at {} Hz through {:?}",
+        handle.position(),
+        sample_rate,
+        backend.sample_format()
+    );
     Ok(())
 }
 
@@ -263,6 +316,16 @@ enum CliError {
     Project(#[from] ProjectError),
     #[error(transparent)]
     Render(#[from] RenderError),
+    #[error(transparent)]
+    Compile(#[from] CompileError),
+    #[error(transparent)]
+    Audio(#[from] AudioError),
+    #[error(transparent)]
+    Realtime(#[from] RealtimeError),
+    #[error(transparent)]
+    RealtimeState(#[from] RealtimeStateError),
+    #[error("the audio output stream failed")]
+    AudioStreamFailed,
     #[error(transparent)]
     Wav(#[from] WavError),
     #[error(transparent)]

@@ -14,9 +14,9 @@ Project -> RenderPlan -> WAV (offline) / audio device (realtime)
 
 ## Status
 
-This is the **Phase 2 first-sound milestone plus the inline MIDI note path**:
-the project compiles into a render plan, schedules sample-accurate notes, and
-renders deterministic audio offline to a WAV file. Realtime playback is next.
+This is the **Phase 2–3 first-sound milestone**: the project compiles into a
+render plan, schedules sample-accurate notes, renders deterministic audio
+offline, and plays through the default sound card in realtime.
 
 What works today:
 
@@ -29,25 +29,26 @@ What works today:
   and effects hook. Notes have add/remove/replace commands and participate in
   selection pruning.
 - `odaw-engine`: the immutable `RenderPlan`, a typed parameter buffer, a block
-  executor that sums inputs in declared order, note events, and a sample-accurate
-  scheduler.
+  executor that sums inputs in declared order, note events, a sample-accurate
+  scheduler, and a lock-free realtime handoff with owned engine state.
 - `odaw-dsp`: primitive in-tree devices (`builtin.sine`, `builtin.poly`,
   `builtin.gain`, `builtin.pass`) and a demo song with a MIDI melody.
 - `odaw-compile`: rack flattening, DAG topological sort, cycle detection,
   port/channel checks, and plan construction.
 - `odaw-render`: deterministic offline rendering with fixed block size.
 - `odaw-io`: a 16-bit PCM WAV writer.
+- `odaw-platform`: `cpal` output with f32/i16/u16 sample conversion.
 - `odaw-format`: versioned DTOs separate from the live types, a postcard project
-  payload, a JSON manifest, and format v1 → v2 migration. MIDI notes are part
-  of the versioned project format.
-- `odaw`: a CLI that creates, inspects, renames, demos, validates, and renders
-  projects.
+  payload, a JSON manifest, and format v1 → v2 migration.
+- `odaw`: a CLI that creates, inspects, renames, demos, validates, renders, and
+  plays projects.
 - CI: formatting, clippy with warnings denied, and the workspace test suite.
 
 Current limits: mono/stereo only, in-tree devices must live in a rack, devices
-with latency are rejected until compensation lands, MIDI notes are not recorded
-from hardware yet, audio clips are not rendered yet, and realtime playback is not
-wired.
+with latency are rejected until compensation lands, the output device must
+support the project sample rate directly (no master resampler yet), MIDI notes
+are not recorded from hardware yet, audio clips are not rendered yet, and there
+is no UI yet.
 
 See [ROADMAP.md](ROADMAP.md) for the product path and
 [.opencode/DESIGN.md](.opencode/DESIGN.md) for the architecture.
@@ -69,6 +70,7 @@ cargo run -p odaw-cli -- inspect song.odaw --json
 cargo run -p odaw-cli -- rename song.odaw "New name"
 cargo run -p odaw-cli -- demo demo.odaw
 cargo run -p odaw-cli -- render demo.odaw -o demo.wav --duration 2
+cargo run -p odaw-cli -- play demo.odaw
 cargo run -p odaw-cli -- validate song.odaw
 ```
 
@@ -94,13 +96,14 @@ dsp/              primitive in-tree devices and the demo project
 compile/          Project -> RenderPlan
 io/               decoders and encoders
 render/           offline renderer
+platform/         cpal audio backend
 format/           versioned DTOs, migrations, container I/O
 control/          commands, staging, dispatch, history, operators, selection
 apps/odaw-cli/    headless CLI
 ```
 
-The remaining crates from `DESIGN.md` (`platform`, `plugins`, `ui`, ...) are
-added when their phase starts, so the tree never carries empty placeholders.
+The remaining crates from `DESIGN.md` (`plugins`, `ui`, ...) are added when
+their phase starts, so the tree never carries empty placeholders.
 
 ## Design documents
 
