@@ -1,0 +1,15 @@
+[package]
+name = "odaw-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+im.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest = "1"
+
+[lints]
+workspace = true
