@@ -17,8 +17,9 @@ depend on the render-plan and parameter contracts.
 | M1 Control core | 1 | Commands, transactions, undo, operators, selection. **Done.** |
 | M2 First sound | 2-3 | Deterministic offline WAV and realtime playback. **Done.** |
 | M3 Arrangement and headless product | 4-5 | Sections, loops, usable CLI. |
-| M4 UI shell and track selection | 6 | Native window, transport, track list, timeline. |
-| M5 Piano roll | 6-7 | MIDI editing and sample-accurate playback. |
+| M4 UI shell and track selection | 6 | Native window, transport, track list, timeline. **Basic UI done.** |
+| M5 Piano roll | 6-7 | MIDI editing and sample-accurate playback. **Basic editor done.** |
+| M6 Automation | 7 | Draw, record, and render parameter automation. |
 | M6 Automation | 7 | Draw, record, and render parameter automation. |
 | M7 CLAP hosting | 8 | CLAP instruments and effects. |
 | M8 VST3 compatibility | 8b | VST3 behind the same device abstraction. |
@@ -127,6 +128,14 @@ Acceptance: select one or more tracks, edit them through operators, undo, and se
 the UI and audio follow. Selection survives a reload only as an in-memory
 workspace preference, never in the project document.
 
+Implemented: native window, transport with play/stop and position, track list,
+track selection, add track with a poly instrument and MIDI clip, timeline with
+clip selection and playhead, inspector for the selected note, and realtime
+publish on structural edits.
+
+Remaining: rename/delete/reorder, mute/solo/arm, multi-select, mixer strips,
+parameter inspector, file dialogs, loop/seek transport.
+
 ## M5 — Piano roll
 
 The data decision is made: MIDI notes live inline in the clip, not only in an
@@ -134,15 +143,15 @@ immutable MIDI asset. Inline notes are what make per-note editing, undo, and
 copy/paste tractable. Import/export remains a separate path through `AssetId`.
 
 Implemented: `Note` / `NoteId`, note add/remove/replace commands, note
-selection, the sample-accurate `Scheduler`, and the `builtin.poly` instrument.
+selection, the sample-accurate `Scheduler`, the `builtin.poly` instrument, and a
+piano roll with grid, snap, zoom, draw, move, resize, delete, undo, and redo.
 
-Work:
+Remaining:
 
-- Note editing commands: add, remove, move, resize, set velocity, transpose.
-- Piano-roll canvas: grid, note lanes, velocity lane, snap/quantize, marquee
-  selection, copy/paste/duplicate, zoom, playhead follow.
-- One drag gesture is one transaction and one undo step.
-- Keyboard shortcuts and note preview.
+- velocity lane and numeric velocity editing;
+- marquee selection, copy/paste/duplicate, transpose;
+- quantize and note preview;
+- playhead follow while playing;
 - MIDI recording and quantization depth in M7.
 
 ## M6 — Automation
@@ -219,12 +228,12 @@ move ahead of CLAP, but the device interface must not fork.
 
 ## Immediate next steps after this commit
 
-1. Commit this tree as the realtime-playback commit.
-2. Add the UI shell with transport, track list, timeline, and track selection.
-3. Build the piano-roll editor on top of the existing notes, commands, selection,
-   scheduler, and poly instrument.
-4. Add arrangement/loop playback using the realtime transport.
+1. Commit this tree as the UI/piano-roll commit.
+2. Add arrangement/loop playback and transport seek.
+3. Add velocity lane, marquee selection, copy/paste, quantize, and playhead
+   follow to the piano roll.
+4. Add automation editing.
 5. Add the versioned command-log DTOs and operation log.
-6. Add automation editing, CLAP, then VST3.
+6. Add CLAP, then VST3.
 7. Add latency compensation, the master rate bridge, and support for
    parallel/sidechain device paths.

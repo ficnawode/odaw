@@ -1,0 +1,19 @@
+[package]
+name = "odaw-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+eframe.workspace = true
+odaw-compile = { path = "../compile" }
+odaw-control = { path = "../control" }
+odaw-core = { path = "../core" }
+odaw-dsp = { path = "../dsp" }
+odaw-engine = { path = "../engine" }
+odaw-format = { path = "../format" }
+odaw-platform = { path = "../platform" }
+odaw-render = { path = "../render" }
+
+[lints]
+workspace = true

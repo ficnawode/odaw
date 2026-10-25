@@ -9,13 +9,13 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use odaw_compile::{CompileError, Compiler};
 use odaw_control::{RenameProject, Session, SessionError};
-use odaw_core::{NodeRole, Project, ProjectError, TempoError, Tick};
+use odaw_core::{NodeRole, Project, ProjectError, TempoError};
 use odaw_dsp::demo;
 use odaw_engine::{RealtimeEngine, RealtimeError, RealtimeState, RealtimeStateError, realtime};
 use odaw_format::{Container, ContainerError, ProjectFile};
 use odaw_io::{WavError, WavSpec, write_wav};
 use odaw_platform::{AudioBackend, AudioCallback, AudioError};
-use odaw_render::{RenderError, RenderOptions, render_project};
+use odaw_render::{RenderError, RenderOptions, project_end_frame, render_project};
 use thiserror::Error;
 
 #[derive(Debug, Parser)]
@@ -278,24 +278,11 @@ fn render_frames(project: &Project, duration: Option<f64>) -> Result<u64, CliErr
         return Ok((seconds * f64::from(project.meta.sample_rate)).round() as u64);
     }
 
-    if let Some(tick) = project_end_tick(project) {
-        let frames = project.tempo.tick_to_frames(tick)?;
-        return Ok(u64::try_from(frames.raw().max(0)).expect("frames are non-negative"));
+    if let Some(frames) = project_end_frame(project)? {
+        return Ok(frames);
     }
 
     Ok(u64::from(project.meta.sample_rate) * 5)
-}
-
-fn project_end_tick(project: &Project) -> Option<Tick> {
-    let mut end: Option<Tick> = None;
-    for loop_region in &project.loops {
-        end = Some(end.map_or(loop_region.end, |current| current.max(loop_region.end)));
-    }
-    for clip in project.clips.values() {
-        let clip_end = Tick::from_raw(clip.start.raw().saturating_add(clip.length.raw()));
-        end = Some(end.map_or(clip_end, |current| current.max(clip_end)));
-    }
-    end.filter(|tick| *tick > Tick::ZERO)
 }
 
 fn project_name(path: &Path) -> String {

@@ -1,7 +1,7 @@
 use std::num::NonZeroUsize;
 
 use odaw_compile::{CompileError, Compiler};
-use odaw_core::Project;
+use odaw_core::{Project, TempoError, Tick};
 use odaw_engine::{Engine, EngineError, Scheduler, SchedulerError};
 use thiserror::Error;
 
@@ -66,6 +66,29 @@ pub enum RenderError {
     TooManyFrames(u64),
 }
 
+pub fn project_end_tick(project: &Project) -> Option<Tick> {
+    let mut end: Option<Tick> = None;
+    for loop_region in &project.loops {
+        end = Some(end.map_or(loop_region.end, |current| current.max(loop_region.end)));
+    }
+    for clip in project.clips.values() {
+        let clip_end = Tick::from_raw(clip.start.raw().saturating_add(clip.length.raw()));
+        end = Some(end.map_or(clip_end, |current| current.max(clip_end)));
+    }
+    end.filter(|tick| *tick > Tick::ZERO)
+}
+
+pub fn project_end_frame(project: &Project) -> Result<Option<u64>, TempoError> {
+    project_end_tick(project)
+        .map(|tick| {
+            project
+                .tempo
+                .tick_to_frames(tick)
+                .map(|frames| frames.raw().max(0) as u64)
+        })
+        .transpose()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,5 +144,19 @@ mod tests {
     fn zero_frames_render_an_empty_buffer() {
         let audio = render_project(&demo::project(), options(64, 0)).unwrap();
         assert!(audio.samples.is_empty());
+    }
+
+    #[test]
+    fn project_end_comes_from_loops_and_clips() {
+        let project = demo::project();
+        assert_eq!(
+            project_end_tick(&project),
+            Some(odaw_core::Tick::from_raw(16 * odaw_core::PPQ))
+        );
+        assert_eq!(project_end_frame(&project), Ok(Some(384_000)));
+        assert_eq!(
+            project_end_tick(&Project::empty("empty", 48_000, 0).unwrap()),
+            None
+        );
     }
 }

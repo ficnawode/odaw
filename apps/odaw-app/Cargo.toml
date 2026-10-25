@@ -1,0 +1,15 @@
+[package]
+name = "odaw-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "odaw-app"
+path = "src/main.rs"
+
+[dependencies]
+odaw-ui = { path = "../../ui" }
+
+[lints]
+workspace = true

@@ -10,7 +10,9 @@ members = [
     "platform",
     "format",
     "control",
+    "ui",
     "apps/odaw-cli",
+    "apps/odaw-app",
 ]
 
 [workspace.package]
@@ -21,6 +23,7 @@ rust-version = "1.85"
 [workspace.dependencies]
 clap = { version = "4.5", features = ["derive"] }
 cpal = "0.18"
+eframe = "0.32"
 im = "15"
 postcard = { version = "1", features = ["use-std"] }
 rtrb = "0.4"

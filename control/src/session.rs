@@ -157,6 +157,14 @@ impl<E: Effects> Session<E> {
         self.commit(vec![command], operator, label)
     }
 
+    pub fn apply_commands(
+        &mut self,
+        commands: Vec<Command>,
+        label: impl Into<String>,
+    ) -> Result<Vec<Event>, SessionError> {
+        self.commit(commands, None, label.into())
+    }
+
     pub fn undo(&mut self) -> Vec<Event> {
         let Some(step) = self.history.undo() else {
             return Vec::new();
@@ -567,6 +575,26 @@ mod tests {
             second.apply_command(command).unwrap();
         }
         assert_eq!(first.project(), second.project());
+    }
+
+    #[test]
+    fn command_batches_form_one_history_entry() {
+        let mut session = Session::new(empty_project()).unwrap();
+        session
+            .apply_commands(
+                vec![
+                    add_track(NodeId::from_raw(1)),
+                    add_track(NodeId::from_raw(2)),
+                ],
+                "Add two tracks",
+            )
+            .unwrap();
+
+        assert_eq!(session.project().nodes.len(), 2);
+        assert_eq!(session.history().len(), 2);
+        assert_eq!(session.undo_label(), Some("Add two tracks"));
+        session.undo();
+        assert!(session.project().nodes.is_empty());
     }
 
     #[test]

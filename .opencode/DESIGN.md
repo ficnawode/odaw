@@ -508,8 +508,8 @@ concrete types are illustrative unless a boundary depends on them.
 - `[CONFIRMED]` The core ships only primitive devices; instruments, effects,
   and presets are separate packs. Startup never blocks on plugin scanning or
   network.
-- `[PROPOSED]` The UI is `egui` (native window, cross-platform). It issues
-  commands and holds no document state.
+- `[CONFIRMED]` The UI is `egui` on `eframe`/`winit` (native window,
+  cross-platform). It issues commands and holds no document state.
 
 ---
 
@@ -842,6 +842,10 @@ Resolved (items already stated in section 3 are not repeated):
     old state on a retirement queue; it never allocates, locks, or frees.
     Parameter updates and transport commands use the same lock-free command
     queue.
+14. `[CONFIRMED]` The native UI is `egui` on `eframe`/`winit` and holds no
+    document state. Edits go through `Session` commands; selection stays in the
+    control layer; structural edits recompile and republish a `RealtimeState`.
+    The UI is replaceable by another client of the same command API.
 
 Still open:
 

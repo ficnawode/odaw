@@ -14,9 +14,11 @@ Project -> RenderPlan -> WAV (offline) / audio device (realtime)
 
 ## Status
 
-This is the **Phase 2–3 first-sound milestone**: the project compiles into a
-render plan, schedules sample-accurate notes, renders deterministic audio
-offline, and plays through the default sound card in realtime.
+This is the **first usable app shell**: the project compiles into a render plan,
+schedules sample-accurate notes, renders deterministic audio offline, plays
+through the sound card, and can be edited in a native track/piano-roll UI.
+
+![odaw UI](docs/odaw-ui.png)
 
 What works today:
 
@@ -26,29 +28,31 @@ What works today:
 - `odaw-control`: versioned commands, the `Tx` staging area, the single
   dispatcher, `ChangeSet` tracking, bounded `History` with undo/redo, operators
   and their registry, and a `Session` that owns the document, history, selection,
-  and effects hook. Notes have add/remove/replace commands and participate in
-  selection pruning.
+  and effects hook.
 - `odaw-engine`: the immutable `RenderPlan`, a typed parameter buffer, a block
-  executor that sums inputs in declared order, note events, a sample-accurate
-  scheduler, and a lock-free realtime handoff with owned engine state.
+  executor, note events, a sample-accurate scheduler, and a lock-free realtime
+  handoff.
 - `odaw-dsp`: primitive in-tree devices (`builtin.sine`, `builtin.poly`,
-  `builtin.gain`, `builtin.pass`) and a demo song with a MIDI melody.
-- `odaw-compile`: rack flattening, DAG topological sort, cycle detection,
+  `builtin.gain`, `builtin.pass`) and a demo song.
+- `odaw-compile`: rack flattening, deterministic DAG ordering, cycle detection,
   port/channel checks, and plan construction.
-- `odaw-render`: deterministic offline rendering with fixed block size.
+- `odaw-render`: deterministic offline rendering.
 - `odaw-io`: a 16-bit PCM WAV writer.
-- `odaw-platform`: `cpal` output with f32/i16/u16 sample conversion.
-- `odaw-format`: versioned DTOs separate from the live types, a postcard project
-  payload, a JSON manifest, and format v1 → v2 migration.
-- `odaw`: a CLI that creates, inspects, renames, demos, validates, renders, and
-  plays projects.
+- `odaw-platform`: `cpal` output with f32/i16/u16 conversion.
+- `odaw-format`: versioned DTOs, postcard payloads, JSON manifests, and v1 → v2
+  migration.
+- `odaw-ui` / `odaw-app`: transport, track selection, timeline, add track, add
+  MIDI clip, and a piano roll with draw, move, resize, delete, snap, zoom, undo,
+  and redo. Edits go through `Session`; structural edits are recompiled and
+  published to the realtime engine.
+- `odaw`: a CLI for create, inspect, rename, demo, validate, render, and play.
 - CI: formatting, clippy with warnings denied, and the workspace test suite.
 
 Current limits: mono/stereo only, in-tree devices must live in a rack, devices
 with latency are rejected until compensation lands, the output device must
-support the project sample rate directly (no master resampler yet), MIDI notes
-are not recorded from hardware yet, audio clips are not rendered yet, and there
-is no UI yet.
+support the project sample rate directly, MIDI notes are not recorded from
+hardware yet, audio clips are not rendered yet, there is no file dialog, no
+velocity lane, no loop/seek transport, and no automation or plugin UI.
 
 See [ROADMAP.md](ROADMAP.md) for the product path and
 [.opencode/DESIGN.md](.opencode/DESIGN.md) for the architecture.
@@ -71,6 +75,7 @@ cargo run -p odaw-cli -- rename song.odaw "New name"
 cargo run -p odaw-cli -- demo demo.odaw
 cargo run -p odaw-cli -- render demo.odaw -o demo.wav --duration 2
 cargo run -p odaw-cli -- play demo.odaw
+cargo run -p odaw-app -- demo.odaw
 cargo run -p odaw-cli -- validate song.odaw
 ```
 
@@ -99,11 +104,13 @@ render/           offline renderer
 platform/         cpal audio backend
 format/           versioned DTOs, migrations, container I/O
 control/          commands, staging, dispatch, history, operators, selection
+ui/               egui application shell, timeline, piano roll
 apps/odaw-cli/    headless CLI
+apps/odaw-app/    native app
 ```
 
-The remaining crates from `DESIGN.md` (`plugins`, `ui`, ...) are added when
-their phase starts, so the tree never carries empty placeholders.
+The remaining crates from `DESIGN.md` (`plugins`, `script`, `protocol`, ...) are
+added when their phase starts, so the tree never carries empty placeholders.
 
 ## Design documents
 
