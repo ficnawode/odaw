@@ -132,10 +132,11 @@ Ableton-like timeline with track headers inside the arrangement, track colors,
 rename, mute/solo, add/delete track, add MIDI clip, clip move/resize/split/
 duplicate, marquee multi-selection, grid zoom/snapping, MIDI and audio previews,
 drag/drop WAV/MP3 import with waveform previews, click/drag ruler seeking,
-split-at-cursor, per-track gain/pan faders, a stereo master out strip with
-faders, inspector, and realtime publish on structural edits. Scrubbing uses the
-realtime seek command and fader gestures commit one value-only command on
-release.
+split-at-cursor, per-track gain/pan faders with post-fader stereo level meters,
+a single stereo master out strip in the timeline, inspector, and realtime
+publish on structural edits. Scrubbing uses the realtime seek command, fader
+gestures commit one value-only command on release, and meters travel from the
+audio thread to the UI through atomics.
 
 Remaining: drag-to-reorder tracks, grouping/folders, arm, track multi-select,
 parameter automation UI, file dialogs, loop transport, and audio-clip playback.
@@ -148,14 +149,13 @@ copy/paste tractable. Import/export remains a separate path through `AssetId`.
 
 Implemented: `Note` / `NoteId`, note add/remove/replace commands, note
 selection, the sample-accurate `Scheduler`, the `builtin.poly` instrument, and a
-collapsible/resizable piano roll with grid, snap, zoom, drag-to-create, move,
-resize, Shift-drag marquee, right-click menus,
-duplicate/velocity/length/transpose actions, undo, and redo.
+collapsible/resizable piano roll with grid, snap, zoom, tap-to-create,
+drag-to-marquee, group move, group transpose, copy/paste, duplicate, resize,
+right-click menus, per-note velocity/length/transpose actions, undo, and redo.
 
 Remaining:
 
 - velocity lane;
-- copy/paste and duplicate ranges;
 - quantize and note preview;
 - playhead follow while playing;
 - MIDI recording and quantization depth in M7.
@@ -237,8 +237,7 @@ move ahead of CLAP, but the device interface must not fork.
 1. Commit this tree as the transport/mixer commit.
 2. Add audio-clip playback so dragged WAV/MP3 clips are audible.
 3. Add loop playback and a loop region editor.
-4. Add velocity lane, copy/paste, quantize, and playhead follow to the piano
-   roll.
+4. Add a velocity lane, quantize, and playhead follow to the piano roll.
 5. Add track grouping/folders and drag-to-reorder.
 6. Add automation editing.
 7. Add CLAP, then VST3.

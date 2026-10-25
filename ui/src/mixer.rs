@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use eframe::egui;
+use eframe::egui::{self, Align2, Color32, FontId, Rect, Sense, pos2, vec2};
 use odaw_core::{NodeId, ParamAddress, ParamId};
 
 use crate::editor::Editor;
@@ -10,18 +10,31 @@ pub const PAN: &str = odaw_dsp::STRIP_PAN_PARAM;
 pub const MIN_GAIN_DB: f64 = -60.0;
 pub const MAX_GAIN_DB: f64 = 12.0;
 
+const METER_WIDTH: f32 = 32.0;
+const METER_HEIGHT: f32 = 18.0;
+
 /// Fader gestures preview straight into the realtime parameter buffer and
 /// commit one document command when the drag ends. Previews are kept here so
-/// the slider does not snap back to the document value mid-drag.
+/// the slider does not snap back to the document value mid-drag. The same
+/// state owns the decaying peak meters shown next to each gain fader.
 #[derive(Debug, Default)]
 pub struct MixerState {
     previews: HashMap<ParamAddress, f64>,
+    levels: HashMap<NodeId, (f32, f32)>,
 }
 
 impl MixerState {
     pub fn clear(&mut self) {
         self.previews.clear();
     }
+
+    /// True while any displayed meter is still decaying and needs repaints.
+    pub fn active(&self) -> bool {
+        self.levels
+            .values()
+            .any(|(left, right)| *left > 0.0005 || *right > 0.0005)
+    }
+
     pub fn gain(&mut self, ui: &mut egui::Ui, editor: &mut Editor, node: NodeId, compact: bool) {
         self.fader(
             ui,
@@ -64,16 +77,17 @@ impl MixerState {
             .or_else(|| editor.param_value(node, param))
             .unwrap_or(default);
 
+        let is_gain = param == GAIN_DB;
         let response = if compact {
             let short = if param == PAN { "P" } else { "G" };
             ui.label(
                 egui::RichText::new(short)
                     .size(9.0)
-                    .color(egui::Color32::from_rgb(145, 151, 164)),
+                    .color(Color32::from_rgb(145, 151, 164)),
             );
-            let width = if param == PAN { 52.0 } else { 74.0 };
+            let width = if is_gain { 52.0 } else { 36.0 };
             let slider = ui.add_sized(
-                egui::vec2(width, 12.0),
+                vec2(width, 12.0),
                 egui::Slider::new(&mut value, range).show_value(false),
             );
             let text = if param == PAN {
@@ -82,28 +96,31 @@ impl MixerState {
                 format!("{value:+.1}")
             };
             ui.add_sized(
-                if param == PAN {
-                    egui::vec2(18.0, 12.0)
+                if is_gain {
+                    vec2(22.0, 12.0)
                 } else {
-                    egui::vec2(24.0, 12.0)
+                    vec2(16.0, 12.0)
                 },
                 egui::Label::new(egui::RichText::new(text).size(9.0)).selectable(false),
             );
             slider
-        } else if param == PAN {
-            ui.add(
-                egui::Slider::new(&mut value, range)
-                    .text(label)
-                    .custom_formatter(|value, _| pan_label(value)),
-            )
-        } else {
-            ui.add(
+        } else if is_gain {
+            let slider_width = (ui.available_width() - METER_WIDTH - 8.0).max(80.0);
+            ui.add_sized(
+                vec2(slider_width, METER_HEIGHT),
                 egui::Slider::new(&mut value, range)
                     .text(label)
                     .suffix(suffix)
                     .custom_formatter(|value, _| format!("{value:.1}")),
             )
+        } else {
+            ui.add(
+                egui::Slider::new(&mut value, range)
+                    .text(label)
+                    .custom_formatter(|value, _| pan_label(value)),
+            )
         };
+
         let response = if compact {
             response
                 .on_hover_text(label)
@@ -121,6 +138,87 @@ impl MixerState {
         {
             editor.commit_param(node, param, value);
         }
+    }
+
+    pub fn meter(&mut self, ui: &mut egui::Ui, editor: &Editor, node: NodeId) {
+        let levels = self.smoothed_levels(editor, node);
+        level_meter(ui, levels);
+    }
+
+    fn smoothed_levels(&mut self, editor: &Editor, node: NodeId) -> (f32, f32) {
+        let measured = editor.meter_levels(node);
+        let level = self.levels.entry(node).or_insert((0.0, 0.0));
+        let decay = 0.86;
+        level.0 = (level.0 * decay).max(measured.0);
+        level.1 = (level.1 * decay).max(measured.1);
+        if level.0 < 0.0005 {
+            level.0 = 0.0;
+        }
+        if level.1 < 0.0005 {
+            level.1 = 0.0;
+        }
+        *level
+    }
+}
+
+fn level_meter(ui: &mut egui::Ui, levels: (f32, f32)) {
+    let (rect, response) = ui.allocate_exact_size(vec2(METER_WIDTH, METER_HEIGHT), Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let painter = ui.painter();
+    painter.rect_filled(rect, 3.0, Color32::from_rgb(17, 19, 23));
+    for (index, (name, value)) in [("L", levels.0), ("R", levels.1)].into_iter().enumerate() {
+        let y = rect.min.y + 2.0 + index as f32 * 7.5;
+        painter.text(
+            pos2(rect.min.x + 2.0, y),
+            Align2::LEFT_TOP,
+            name,
+            FontId::monospace(7.5),
+            Color32::from_rgb(112, 118, 130),
+        );
+        let bar = Rect::from_min_size(
+            pos2(rect.min.x + 10.0, y + 0.5),
+            vec2(rect.width() - 13.0, 5.0),
+        );
+        painter.rect_filled(bar, 1.0, Color32::from_rgb(28, 31, 37));
+        let ratio = meter_ratio(value);
+        if ratio > 0.0 {
+            let fill = Rect::from_min_size(bar.min, vec2(bar.width() * ratio, bar.height()));
+            painter.rect_filled(fill, 1.0, meter_color(value));
+        }
+    }
+    response.on_hover_text(format!(
+        "L {} · R {}",
+        db_label(levels.0),
+        db_label(levels.1)
+    ));
+}
+
+fn meter_ratio(value: f32) -> f32 {
+    if value <= 0.0 {
+        return 0.0;
+    }
+    let db = 20.0 * value.max(1.0e-6).log10();
+    ((db + 60.0) / 60.0).clamp(0.0, 1.0)
+}
+
+fn meter_color(value: f32) -> Color32 {
+    let db = 20.0 * value.max(1.0e-6).log10();
+    if db > -3.0 {
+        Color32::from_rgb(240, 92, 92)
+    } else if db > -12.0 {
+        Color32::from_rgb(226, 190, 76)
+    } else {
+        Color32::from_rgb(84, 196, 132)
+    }
+}
+
+fn db_label(value: f32) -> String {
+    if value <= 0.0005 {
+        "-inf dB".to_owned()
+    } else {
+        format!("{:.1} dB", 20.0 * value.log10())
     }
 }
 

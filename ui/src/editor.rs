@@ -36,6 +36,13 @@ pub struct Editor {
     audio: Option<AudioSession>,
     audio_error: Option<String>,
     imported: HashMap<AssetId, ImportedAudio>,
+    note_clipboard: Option<NoteClipboard>,
+}
+
+#[derive(Clone, Debug)]
+struct NoteClipboard {
+    notes: Vec<Note>,
+    origin: Tick,
 }
 
 #[derive(Clone, Debug)]
@@ -96,6 +103,7 @@ impl Editor {
             audio: None,
             audio_error: None,
             imported: HashMap::new(),
+            note_clipboard: None,
         };
         editor.ensure_selection();
         editor.load_imported_assets();
@@ -250,6 +258,19 @@ impl Editor {
 
     pub fn audio_ready(&self) -> bool {
         self.audio.is_some()
+    }
+
+    /// Latest stereo peak for a track/master channel strip. Values are linear
+    /// amplitudes and are reported as silence while the transport is stopped so
+    /// the UI meter can decay instead of holding the last block forever.
+    pub fn meter_levels(&self, node: NodeId) -> (f32, f32) {
+        if !self.playing {
+            return (0.0, 0.0);
+        }
+        self.audio
+            .as_ref()
+            .and_then(|audio| audio.handle.meter_levels(node))
+            .unwrap_or((0.0, 0.0))
     }
 
     pub fn start_audio(&mut self) {
@@ -931,6 +952,175 @@ impl Editor {
         self.after_edit(result);
     }
 
+    pub fn selected_notes_in(&self, clip: ClipId) -> Vec<Note> {
+        let selection = self.session.selection();
+        self.notes(clip)
+            .into_iter()
+            .filter(|note| selection.notes.contains(&note.id))
+            .collect()
+    }
+
+    pub fn replace_notes(&mut self, clip: ClipId, notes: Vec<Note>) {
+        if notes.is_empty() {
+            return;
+        }
+        let commands = notes
+            .into_iter()
+            .map(|note| Command::new(CommandKind::Note(NoteCommand::Replace { clip, note })))
+            .collect();
+        let result = self.session.apply_commands(commands, "Edit notes");
+        self.after_edit(result);
+    }
+
+    pub fn transpose_selected_notes(&mut self, semitones: i32) {
+        if semitones == 0 {
+            return;
+        }
+        let Some(clip) = self.selected_clip() else {
+            return;
+        };
+        let selected = self.selected_notes_in(clip);
+        let notes: Vec<Note> = selected
+            .iter()
+            .filter_map(|note| {
+                let pitch = (i32::from(note.pitch) + semitones).clamp(0, 127) as u8;
+                (pitch != note.pitch).then_some(Note { pitch, ..*note })
+            })
+            .collect();
+        if notes.is_empty() {
+            return;
+        }
+        let count = notes.len();
+        self.replace_notes(clip, notes);
+        self.status = Some(format!(
+            "transposed {count} note(s) by {semitones:+} semitones"
+        ));
+    }
+
+    pub fn copy_selected_notes(&mut self) -> bool {
+        let Some(clip) = self.selected_clip() else {
+            return false;
+        };
+        let notes = self.selected_notes_in(clip);
+        if notes.is_empty() {
+            return false;
+        }
+        let origin = notes.iter().map(|note| note.start.raw()).min().unwrap_or(0);
+        let count = notes.len();
+        self.note_clipboard = Some(NoteClipboard {
+            notes,
+            origin: Tick::from_raw(origin),
+        });
+        self.status = Some(format!("copied {count} note(s)"));
+        true
+    }
+
+    pub fn note_clipboard_len(&self) -> Option<usize> {
+        self.note_clipboard
+            .as_ref()
+            .map(|clipboard| clipboard.notes.len())
+    }
+
+    pub fn paste_notes_at_cursor(&mut self) {
+        let Some(clip_id) = self.selected_clip() else {
+            return;
+        };
+        let Some(clip) = self.session.project().clips.get(&clip_id).cloned() else {
+            return;
+        };
+        let Some(clipboard) = self.note_clipboard.clone() else {
+            return;
+        };
+        let clip_end = Tick::from_raw(clip.start.raw().saturating_add(clip.length.raw()));
+        let target = if self.cursor >= clip.start && self.cursor < clip_end {
+            Tick::from_raw(self.cursor.raw() - clip.start.raw())
+        } else {
+            clipboard.origin
+        };
+        self.insert_note_copies(
+            clip_id,
+            &clip,
+            &clipboard.notes,
+            clipboard.origin,
+            target,
+            "Paste notes",
+        );
+    }
+
+    pub fn duplicate_selected_notes(&mut self) {
+        let Some(clip_id) = self.selected_clip() else {
+            return;
+        };
+        let Some(clip) = self.session.project().clips.get(&clip_id).cloned() else {
+            return;
+        };
+        let notes = self.selected_notes_in(clip_id);
+        if notes.is_empty() {
+            return;
+        }
+        let origin = notes.iter().map(|note| note.start.raw()).min().unwrap_or(0);
+        let target = notes
+            .iter()
+            .map(|note| note.start.raw().saturating_add(note.length.raw()))
+            .max()
+            .unwrap_or(origin);
+        self.insert_note_copies(
+            clip_id,
+            &clip,
+            &notes,
+            Tick::from_raw(origin),
+            Tick::from_raw(target),
+            "Duplicate notes",
+        );
+    }
+
+    fn insert_note_copies(
+        &mut self,
+        clip_id: ClipId,
+        clip: &Clip,
+        source: &[Note],
+        origin: Tick,
+        target: Tick,
+        label: &str,
+    ) {
+        if source.is_empty() {
+            return;
+        }
+        let span = source
+            .iter()
+            .map(|note| (note.start.raw() - origin.raw()).saturating_add(note.length.raw().max(1)))
+            .max()
+            .unwrap_or(1);
+        let target = target.raw().clamp(0, (clip.length.raw() - span).max(0));
+        let mut commands = Vec::new();
+        let mut pasted = BTreeSet::new();
+        for note in source {
+            let start = (target + (note.start.raw() - origin.raw()))
+                .clamp(0, clip.length.raw().saturating_sub(1));
+            let length = note
+                .length
+                .raw()
+                .max(1)
+                .min((clip.length.raw() - start).max(1));
+            let id = self.session.next_note_id();
+            pasted.insert(id);
+            commands.push(Command::new(CommandKind::Note(NoteCommand::Add {
+                clip: clip_id,
+                note: Note {
+                    id,
+                    start: Tick::from_raw(start),
+                    length: Tick::from_raw(length),
+                    ..*note
+                },
+            })));
+        }
+        let result = self.session.apply_commands(commands, label);
+        if self.after_edit(result) {
+            self.select_notes(pasted, false);
+            self.status = Some(format!("{label} ({} notes)", source.len()));
+        }
+    }
+
     pub fn set_track_name(&mut self, track: NodeId, name: Option<String>) {
         let result =
             self.session
@@ -1485,6 +1675,7 @@ mod tests {
             audio: None,
             audio_error: None,
             imported: HashMap::new(),
+            note_clipboard: None,
         }
     }
 
@@ -1578,6 +1769,30 @@ mod tests {
         assert_eq!(editor.param_value(track, "gain_db"), Some(-6.0));
         assert_eq!(editor.param_value(track, "pan"), Some(0.5));
         assert_eq!(editor.session.undo_label(), Some("Set parameter"));
+    }
+
+    #[test]
+    fn notes_can_be_copied_pasted_transposed_and_duplicated() {
+        let mut editor = test_editor();
+        let clip = editor.selected_clip().unwrap();
+        let originals = editor.notes(clip);
+        let first: BTreeSet<NoteId> = originals.iter().take(4).map(|note| note.id).collect();
+        editor.select_notes(first, false);
+        assert!(editor.copy_selected_notes());
+        assert_eq!(editor.note_clipboard_len(), Some(4));
+
+        editor.set_cursor(Tick::from_raw(8 * PPQ));
+        editor.paste_notes_at_cursor();
+        assert_eq!(editor.notes(clip).len(), originals.len() + 4);
+
+        editor.transpose_selected_notes(12);
+        let pasted = editor.selected_notes_in(clip);
+        assert_eq!(pasted.len(), 4);
+        let pitches: Vec<u8> = pasted.iter().map(|note| note.pitch).collect();
+        assert_eq!(pitches, vec![72, 76, 79, 84]);
+
+        editor.duplicate_selected_notes();
+        assert_eq!(editor.notes(clip).len(), originals.len() + 8);
     }
 
     #[test]

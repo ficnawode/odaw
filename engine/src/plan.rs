@@ -2,6 +2,7 @@ use std::fmt;
 
 use odaw_core::NodeId;
 
+use crate::meter::MeterBank;
 use crate::param::ParamBuffer;
 
 pub type BufferId = usize;
@@ -27,6 +28,7 @@ pub struct PlanStep {
 pub struct CompiledProject {
     pub plan: RenderPlan,
     pub params: ParamBuffer,
+    pub meters: MeterBank,
 }
 
 pub trait DeviceProcessor: fmt::Debug + Send {

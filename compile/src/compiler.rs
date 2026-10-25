@@ -6,7 +6,9 @@ use odaw_core::{
     Port, PortDirection, PortId, Project, ValidationError,
 };
 use odaw_dsp::{ChannelStrip, NodeRegistry, STRIP_GAIN_PARAM, STRIP_PAN_PARAM, Silence};
-use odaw_engine::{BufferId, CompiledProject, DeviceProcessor, ParamBuffer, PlanStep, RenderPlan};
+use odaw_engine::{
+    BufferId, CompiledProject, DeviceProcessor, MeterBank, ParamBuffer, PlanStep, RenderPlan,
+};
 use thiserror::Error;
 
 type UnitId = usize;
@@ -104,6 +106,7 @@ impl Compiler {
             check_ports(*owner, node, channels)?;
         }
 
+        let meters = MeterBank::new(owners.iter().copied());
         let mut units: Vec<Unit> = Vec::new();
         let mut owner_output: BTreeMap<NodeId, UnitId> = BTreeMap::new();
         let mut owner_input: BTreeMap<NodeId, UnitId> = BTreeMap::new();
@@ -184,10 +187,14 @@ impl Compiler {
             // Keeping it in the plan (rather than as a document device) means
             // gain and pan stay value-only parameters and never rebuild audio.
             let strip_unit = units.len();
+            let strip = meters.slot(*owner).map_or_else(
+                || ChannelStrip::new(*owner),
+                |meter| ChannelStrip::new(*owner).with_meter(meter),
+            );
             units.push(Unit {
                 node: *owner,
                 event_target: None,
-                processor: Some(Box::new(ChannelStrip::new(*owner))),
+                processor: Some(Box::new(strip)),
                 dependencies: previous_unit.into_iter().collect(),
             });
             owner_output.insert(*owner, strip_unit);
@@ -314,6 +321,7 @@ impl Compiler {
                 master: Some(master_buffer),
             },
             params,
+            meters,
         })
     }
 }
@@ -589,6 +597,15 @@ mod tests {
             }),
             Some(ParamValue::Float(0.0))
         );
+    }
+
+    #[test]
+    fn every_owner_gets_a_stereo_meter() {
+        let compiled = compile(&demo::project()).unwrap();
+        assert_eq!(compiled.meters.len(), 2);
+        assert!(compiled.meters.slot(NodeId::from_raw(1)).is_some());
+        assert!(compiled.meters.slot(NodeId::from_raw(4)).is_some());
+        assert!(compiled.meters.slot(NodeId::from_raw(2)).is_none());
     }
 
     #[test]

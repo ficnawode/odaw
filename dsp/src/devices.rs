@@ -1,7 +1,8 @@
 use std::f64::consts::TAU;
+use std::sync::Arc;
 
 use odaw_core::{NodeId, ParamAddress, ParamId};
-use odaw_engine::{Block, DeviceProcessor, NoteEventKind};
+use odaw_engine::{Block, DeviceProcessor, Meter, NoteEventKind};
 
 pub const SINE_KIND: &str = "builtin.sine";
 pub const POLY_KIND: &str = "builtin.poly";
@@ -81,6 +82,7 @@ impl DeviceProcessor for Gain {
 pub struct ChannelStrip {
     gain: ParamAddress,
     pan: ParamAddress,
+    meter: Option<Arc<Meter>>,
 }
 
 impl ChannelStrip {
@@ -94,7 +96,13 @@ impl ChannelStrip {
                 node,
                 param: ParamId::new(STRIP_PAN_PARAM),
             },
+            meter: None,
         }
+    }
+
+    pub fn with_meter(mut self, meter: Arc<Meter>) -> Self {
+        self.meter = Some(meter);
+        self
     }
 }
 
@@ -107,31 +115,34 @@ impl DeviceProcessor for ChannelStrip {
             for (destination, input) in block.output.iter_mut().zip(block.input) {
                 *destination = *input * gain;
             }
-            return;
-        }
-
-        let left = gain * (1.0 - pan).clamp(0.0, 1.0);
-        let right = gain * (1.0 + pan).clamp(0.0, 1.0);
-        match block.channels {
-            0 => {}
-            1 => {
-                for (destination, input) in block.output.iter_mut().zip(block.input) {
-                    *destination = *input * gain;
+        } else {
+            let left = gain * (1.0 - pan).clamp(0.0, 1.0);
+            let right = gain * (1.0 + pan).clamp(0.0, 1.0);
+            match block.channels {
+                0 => {}
+                1 => {
+                    for (destination, input) in block.output.iter_mut().zip(block.input) {
+                        *destination = *input * gain;
+                    }
                 }
-            }
-            _ => {
-                for (input, output) in block
-                    .input
-                    .chunks_exact(block.channels)
-                    .zip(block.output.chunks_exact_mut(block.channels))
-                {
-                    output[0] = input[0] * left;
-                    output[1] = input[1] * right;
-                    for channel in 2..block.channels {
-                        output[channel] = input[channel] * gain;
+                _ => {
+                    for (input, output) in block
+                        .input
+                        .chunks_exact(block.channels)
+                        .zip(block.output.chunks_exact_mut(block.channels))
+                    {
+                        output[0] = input[0] * left;
+                        output[1] = input[1] * right;
+                        for channel in 2..block.channels {
+                            output[channel] = input[channel] * gain;
+                        }
                     }
                 }
             }
+        }
+
+        if let Some(meter) = &self.meter {
+            meter.store_block(block.output, block.channels);
         }
     }
 }
@@ -459,6 +470,31 @@ mod tests {
         assert!((output[1] - gain).abs() < 1e-6);
         assert!((output[2] - 0.0).abs() < 1e-6);
         assert!((output[3] - 0.5 * gain).abs() < 1e-6);
+    }
+
+    #[test]
+    fn channel_strip_reports_post_fader_levels() {
+        let node = NodeId::from_raw(1);
+        let params = ParamBuffer::new();
+        let meter = Arc::new(Meter::new());
+        let input = vec![0.4, -0.8, 0.2, -0.1];
+        let mut output = output_buffer(2, 2);
+        let mut block = Block {
+            node,
+            sample_rate: 48_000,
+            channels: 2,
+            start_frame: 0,
+            frames: 2,
+            input: &input,
+            output: &mut output,
+            params: &params,
+            event_target: None,
+            events: &[],
+        };
+        ChannelStrip::new(node)
+            .with_meter(Arc::clone(&meter))
+            .process(&mut block);
+        assert_eq!(meter.levels(), (0.4, 0.8));
     }
 
     #[test]

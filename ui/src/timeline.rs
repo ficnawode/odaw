@@ -704,10 +704,11 @@ fn track_header(
                 }
             });
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 3.0;
+                ui.spacing_mut().item_spacing.x = 2.0;
                 ui.add_space(8.0);
                 mixer.gain(ui, editor, track.id, true);
                 mixer.pan(ui, editor, track.id, true);
+                mixer.meter(ui, editor, track.id);
             });
         },
     );
@@ -726,10 +727,11 @@ fn master_header(ui: &mut egui::Ui, editor: &mut Editor, mixer: &mut MixerState,
                 ui.small("stereo out");
             });
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 3.0;
+                ui.spacing_mut().item_spacing.x = 2.0;
                 ui.add_space(8.0);
                 mixer.gain(ui, editor, master, true);
                 mixer.pan(ui, editor, master, true);
+                mixer.meter(ui, editor, master);
             });
         },
     );

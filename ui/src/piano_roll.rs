@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, pos2, vec2};
 use odaw_core::{Clip, ClipContent, ClipId, Note, NoteId, PPQ, Tick};
@@ -51,18 +51,23 @@ impl Snap {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DragMode {
-    Create,
     Move,
     Resize,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct DragState {
-    clip: ClipId,
-    original: Option<Note>,
-    preview: Note,
+    originals: Vec<Note>,
+    previews: Vec<Note>,
     mode: DragMode,
     start_pointer: Pos2,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Marquee {
+    start: Pos2,
+    current: Pos2,
+    moved: bool,
 }
 
 #[derive(Debug)]
@@ -70,7 +75,7 @@ pub struct PianoRollState {
     pub pixels_per_beat: f32,
     pub snap: Snap,
     drag: Option<DragState>,
-    marquee: Option<(Pos2, Pos2)>,
+    marquee: Option<Marquee>,
     active_clip: Option<ClipId>,
     context_note: Option<NoteId>,
     context_tick: Option<Tick>,
@@ -104,7 +109,7 @@ impl PianoRollState {
 
     pub fn show(&mut self, ui: &mut egui::Ui, editor: &mut Editor) {
         editor.ensure_selection();
-        self.controls(ui);
+        self.controls(ui, editor);
 
         let Some((clip_id, clip)) = editor
             .selected_clip_data()
@@ -127,6 +132,11 @@ impl PianoRollState {
 
         let notes: Vec<Note> = editor.notes(clip_id);
         let selected: BTreeSet<NoteId> = editor.session.selection().notes.clone();
+        let previews: BTreeMap<NoteId, Note> = self
+            .drag
+            .as_ref()
+            .map(|drag| drag.previews.iter().map(|note| (note.id, *note)).collect())
+            .unwrap_or_default();
         let px_per_tick = self.pixels_per_beat / PPQ as f32;
         let height = f32::from(PITCH_HIGH - PITCH_LOW + 1) * ROW_HEIGHT;
         let viewport_width = (ui.available_width() - KEY_WIDTH - 12.0).max(240.0);
@@ -168,7 +178,7 @@ impl PianoRollState {
                                 grid_width,
                                 &notes,
                                 &selected,
-                                self.drag.map(|drag| drag.preview),
+                                &previews,
                                 hovered,
                                 px_per_tick,
                             );
@@ -182,8 +192,8 @@ impl PianoRollState {
                                 origin,
                                 px_per_tick,
                             );
-                            if let Some((start, end)) = self.marquee {
-                                let rect = Rect::from_two_pos(start, end);
+                            if let Some(marquee) = self.marquee.filter(|marquee| marquee.moved) {
+                                let rect = Rect::from_two_pos(marquee.start, marquee.current);
                                 painter.rect_filled(
                                     rect,
                                     0.0,
@@ -201,8 +211,8 @@ impl PianoRollState {
             });
     }
 
-    fn controls(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+    fn controls(&mut self, ui: &mut egui::Ui, editor: &mut Editor) {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Zoom");
             ui.add(egui::Slider::new(&mut self.pixels_per_beat, 30.0..=500.0).show_value(false));
             ui.separator();
@@ -215,7 +225,54 @@ impl PianoRollState {
                     }
                 });
             ui.separator();
-            ui.label("Drag empty grid to create · drag notes to move · right edge resizes · Shift-drag selects notes · right-click menu · pinch or Ctrl-scroll to zoom");
+
+            let selected = editor.session.selection().notes.len();
+            let has_clipboard = editor.note_clipboard_len().is_some();
+            if ui
+                .add_enabled(selected > 0, egui::Button::new("Copy"))
+                .on_hover_text("Copy selected notes (Ctrl+C)")
+                .clicked()
+            {
+                editor.copy_selected_notes();
+            }
+            if ui
+                .add_enabled(has_clipboard, egui::Button::new("Paste @ cursor"))
+                .on_hover_text("Paste at the red timeline cursor (Ctrl+V)")
+                .clicked()
+            {
+                editor.paste_notes_at_cursor();
+                self.drag = None;
+                self.marquee = None;
+            }
+            if ui
+                .add_enabled(selected > 0, egui::Button::new("Duplicate"))
+                .on_hover_text("Duplicate the selected notes (Ctrl+D)")
+                .clicked()
+            {
+                editor.duplicate_selected_notes();
+                self.drag = None;
+            }
+            ui.menu_button("Transpose", |ui| {
+                for (label, semitones) in [("-12", -12), ("-1", -1), ("+1", 1), ("+12", 12)] {
+                    if ui
+                        .add_enabled(selected > 0, egui::Button::new(label))
+                        .clicked()
+                    {
+                        editor.transpose_selected_notes(semitones);
+                        ui.close();
+                    }
+                }
+            });
+            ui.separator();
+            if selected == 0 {
+                ui.small(
+                    "Tap a grid cell to add a note · drag empty space to select a pattern · drag notes to move",
+                );
+            } else {
+                ui.small(format!(
+                    "{selected} note(s) selected · drag to move · Up/Down transpose"
+                ));
+            }
         });
     }
 
@@ -271,46 +328,42 @@ impl PianoRollState {
             if let Some(position) = pointer {
                 if grid.contains(position) {
                     if let Some(note) = hit_note(notes, position, origin, px_per_tick) {
-                        let rect = note_rect(note, origin, px_per_tick);
-                        let mode = if position.x > rect.max.x - 6.0 {
-                            DragMode::Resize
+                        if shift {
+                            editor.select_note(note.id, true);
+                        } else if !editor.session.selection().notes.contains(&note.id) {
+                            editor.select_note(note.id, false);
+                        }
+                        let still_selected = editor.session.selection().notes.contains(&note.id);
+                        if still_selected {
+                            let selected = editor.selected_notes_in(clip_id);
+                            let originals = if selected.is_empty() {
+                                vec![note]
+                            } else {
+                                selected
+                            };
+                            let mode = if originals.len() == 1
+                                && position.x > note_rect(note, origin, px_per_tick).max.x - 6.0
+                            {
+                                DragMode::Resize
+                            } else {
+                                DragMode::Move
+                            };
+                            self.marquee = None;
+                            self.drag = Some(DragState {
+                                previews: originals.clone(),
+                                originals,
+                                mode,
+                                start_pointer: position,
+                            });
                         } else {
-                            DragMode::Move
-                        };
-                        editor.select_note(note.id, shift);
-                        self.drag = Some(DragState {
-                            clip: clip_id,
-                            original: Some(note),
-                            preview: note,
-                            mode,
-                            start_pointer: position,
-                        });
-                    } else if shift {
-                        self.drag = None;
-                        self.marquee = Some((position, position));
+                            self.drag = None;
+                        }
                     } else {
-                        let tick = x_to_tick(position.x - origin.x, px_per_tick);
-                        let max_start = (clip.length.raw() - 1).max(0);
-                        let start = snap_tick(tick, self.snap).clamp(0, max_start);
-                        let pitch = y_to_pitch(position.y - origin.y);
-                        let length = self
-                            .snap
-                            .ticks()
-                            .min((clip.length.raw() - start).max(1))
-                            .max(1);
-                        self.drag = Some(DragState {
-                            clip: clip_id,
-                            original: None,
-                            preview: Note {
-                                id: NoteId::from_raw(0),
-                                pitch,
-                                start: Tick::from_raw(start),
-                                length: Tick::from_raw(length),
-                                velocity: 100,
-                                channel: 0,
-                            },
-                            mode: DragMode::Create,
-                            start_pointer: position,
+                        self.drag = None;
+                        self.marquee = Some(Marquee {
+                            start: position,
+                            current: position,
+                            moved: false,
                         });
                     }
                 }
@@ -318,68 +371,83 @@ impl PianoRollState {
         }
 
         if primary_down {
-            if let (Some(drag), Some(position)) = (self.drag, pointer) {
-                let delta_ticks =
-                    ((position.x - drag.start_pointer.x) / px_per_tick).round() as i64;
-                let delta_pitch =
-                    -((position.y - drag.start_pointer.y) / ROW_HEIGHT).round() as i32;
-                let preview = match drag.mode {
-                    DragMode::Create => {
-                        let length = snap_tick(delta_ticks, self.snap)
-                            .max(self.snap.ticks())
-                            .min((clip.length.raw() - drag.preview.start.raw()).max(1));
-                        Note {
-                            length: Tick::from_raw(length),
-                            ..drag.preview
-                        }
-                    }
-                    DragMode::Move => moved_note(
-                        drag.original.expect("move drags have an original note"),
-                        delta_ticks,
-                        delta_pitch,
-                        clip.length,
-                        self.snap,
-                    ),
-                    DragMode::Resize => resized_note(
-                        drag.original.expect("resize drags have an original note"),
-                        delta_ticks,
-                        clip.length,
-                        self.snap,
-                    ),
-                };
-                self.drag = Some(DragState { preview, ..drag });
-            }
-            if let (Some((start, _)), Some(position)) = (self.marquee, pointer) {
-                self.marquee = Some((start, position));
+            if let Some(position) = pointer {
+                if let Some(drag) = self.drag.clone() {
+                    let delta_ticks =
+                        ((position.x - drag.start_pointer.x) / px_per_tick).round() as i64;
+                    let delta_pitch =
+                        -((position.y - drag.start_pointer.y) / ROW_HEIGHT).round() as i32;
+                    let previews = match drag.mode {
+                        DragMode::Move => moved_notes(
+                            &drag.originals,
+                            delta_ticks,
+                            delta_pitch,
+                            clip.length,
+                            self.snap,
+                        ),
+                        DragMode::Resize => drag
+                            .originals
+                            .first()
+                            .map(|note| {
+                                vec![resized_note(*note, delta_ticks, clip.length, self.snap)]
+                            })
+                            .unwrap_or_default(),
+                    };
+                    self.drag = Some(DragState { previews, ..drag });
+                }
+                if let Some(marquee) = self.marquee {
+                    let moved = marquee.moved || marquee.start.distance(position) > 3.0;
+                    self.marquee = Some(Marquee {
+                        current: position,
+                        moved,
+                        ..marquee
+                    });
+                }
             }
         }
 
         if primary_released {
-            if let Some((start, end)) = self.marquee.take() {
-                let rect = Rect::from_two_pos(start, end);
-                let ids: BTreeSet<NoteId> = notes
-                    .iter()
-                    .filter(|note| rect.intersects(note_rect(**note, origin, px_per_tick)))
-                    .map(|note| note.id)
-                    .collect();
-                editor.select_notes(ids, true);
+            if let Some(marquee) = self.marquee.take() {
+                if marquee.moved {
+                    let rect = Rect::from_two_pos(marquee.start, marquee.current);
+                    let ids: BTreeSet<NoteId> = notes
+                        .iter()
+                        .filter(|note| rect.intersects(note_rect(**note, origin, px_per_tick)))
+                        .map(|note| note.id)
+                        .collect();
+                    editor.select_notes(ids, shift);
+                } else {
+                    let tick = x_to_tick(marquee.start.x - origin.x, px_per_tick);
+                    let max_start = (clip.length.raw() - 1).max(0);
+                    let start = snap_tick(tick, self.snap).clamp(0, max_start);
+                    let pitch = y_to_pitch(marquee.start.y - origin.y);
+                    let length = self
+                        .snap
+                        .ticks()
+                        .min((clip.length.raw() - start).max(1))
+                        .max(1);
+                    editor.add_note(
+                        clip_id,
+                        pitch,
+                        Tick::from_raw(start),
+                        Tick::from_raw(length),
+                        100,
+                    );
+                }
             }
             if let Some(drag) = self.drag.take() {
-                match drag.mode {
-                    DragMode::Create => editor.add_note(
-                        drag.clip,
-                        drag.preview.pitch,
-                        drag.preview.start,
-                        drag.preview.length,
-                        drag.preview.velocity,
-                    ),
-                    DragMode::Move | DragMode::Resize => {
-                        if let Some(original) = drag.original {
-                            if drag.preview != original {
-                                editor.replace_note(drag.clip, drag.preview);
-                            }
-                        }
-                    }
+                let changed: Vec<Note> = drag
+                    .previews
+                    .into_iter()
+                    .filter(|preview| {
+                        drag.originals
+                            .iter()
+                            .find(|original| original.id == preview.id)
+                            .is_some_and(|original| original != preview)
+                    })
+                    .collect();
+                if !changed.is_empty() {
+                    editor.replace_notes(clip_id, changed);
                 }
             }
         }
@@ -387,7 +455,9 @@ impl PianoRollState {
         if secondary_pressed && response.hovered() {
             if let Some(position) = pointer {
                 if let Some(note) = hit_note(notes, position, origin, px_per_tick) {
-                    editor.select_note(note.id, shift);
+                    if !editor.session.selection().notes.contains(&note.id) {
+                        editor.select_note(note.id, false);
+                    }
                     self.context_note = Some(note.id);
                     self.context_tick = Some(note.start);
                     self.context_pitch = Some(note.pitch);
@@ -410,52 +480,104 @@ impl PianoRollState {
         let context_tick = self.context_tick;
         let context_pitch = self.context_pitch;
         let snap = self.snap;
+        let selection = editor.session.selection().notes.clone();
+        let group =
+            context_note.is_some_and(|note| selection.contains(&note)) && selection.len() > 1;
         response.context_menu(|ui| {
             if let Some(note_id) = context_note {
-                if ui.button("Duplicate note").clicked() {
-                    editor.duplicate_note(clip_id, note_id);
-                    ui.close();
-                }
-                if ui.button("Delete note").clicked() {
-                    editor.remove_note(clip_id, note_id);
-                    ui.close();
-                }
-                ui.menu_button("Velocity", |ui| {
-                    for velocity in [32, 64, 96, 127] {
-                        if ui.button(velocity.to_string()).clicked() {
-                            editor.set_note_velocity(clip_id, note_id, velocity);
-                            ui.close();
-                        }
-                    }
-                });
-                ui.menu_button("Length", |ui| {
-                    for (label, ticks) in [
-                        ("1/16", PPQ / 4),
-                        ("1/8", PPQ / 2),
-                        ("1/4", PPQ),
-                        ("1/2", PPQ * 2),
-                        ("1 bar", PPQ * 4),
-                    ] {
-                        if ui.button(label).clicked() {
-                            editor.set_note_length(clip_id, note_id, Tick::from_raw(ticks));
-                            ui.close();
-                        }
-                    }
-                });
-                ui.menu_button("Transpose", |ui| {
-                    if ui.button("+12").clicked() {
-                        editor.transpose_note(clip_id, note_id, 12);
+                if group {
+                    if ui.button("Copy selection").clicked() {
+                        editor.copy_selected_notes();
                         ui.close();
                     }
-                    if ui.button("-12").clicked() {
-                        editor.transpose_note(clip_id, note_id, -12);
+                    if ui
+                        .add_enabled(
+                            editor.note_clipboard_len().is_some(),
+                            egui::Button::new("Paste at cursor"),
+                        )
+                        .clicked()
+                    {
+                        editor.paste_notes_at_cursor();
                         ui.close();
                     }
-                });
+                    if ui.button("Duplicate selection").clicked() {
+                        editor.duplicate_selected_notes();
+                        ui.close();
+                    }
+                    ui.menu_button("Transpose selection", |ui| {
+                        for (label, semitones) in [("-12", -12), ("-1", -1), ("+1", 1), ("+12", 12)]
+                        {
+                            if ui.button(label).clicked() {
+                                editor.transpose_selected_notes(semitones);
+                                ui.close();
+                            }
+                        }
+                    });
+                    if ui.button("Delete selection").clicked() {
+                        editor.delete_selected_notes();
+                        ui.close();
+                    }
+                } else {
+                    if ui.button("Duplicate note").clicked() {
+                        editor.duplicate_note(clip_id, note_id);
+                        ui.close();
+                    }
+                    if ui.button("Copy note").clicked() {
+                        editor.copy_selected_notes();
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(
+                            editor.note_clipboard_len().is_some(),
+                            egui::Button::new("Paste at cursor"),
+                        )
+                        .clicked()
+                    {
+                        editor.paste_notes_at_cursor();
+                        ui.close();
+                    }
+                    if ui.button("Delete note").clicked() {
+                        editor.remove_note(clip_id, note_id);
+                        ui.close();
+                    }
+                    ui.menu_button("Velocity", |ui| {
+                        for velocity in [32, 64, 96, 127] {
+                            if ui.button(velocity.to_string()).clicked() {
+                                editor.set_note_velocity(clip_id, note_id, velocity);
+                                ui.close();
+                            }
+                        }
+                    });
+                    ui.menu_button("Length", |ui| {
+                        for (label, ticks) in [
+                            ("1/16", PPQ / 4),
+                            ("1/8", PPQ / 2),
+                            ("1/4", PPQ),
+                            ("1/2", PPQ * 2),
+                            ("1 bar", PPQ * 4),
+                        ] {
+                            if ui.button(label).clicked() {
+                                editor.set_note_length(clip_id, note_id, Tick::from_raw(ticks));
+                                ui.close();
+                            }
+                        }
+                    });
+                    ui.menu_button("Transpose", |ui| {
+                        if ui.button("+12").clicked() {
+                            editor.transpose_note(clip_id, note_id, 12);
+                            ui.close();
+                        }
+                        if ui.button("-12").clicked() {
+                            editor.transpose_note(clip_id, note_id, -12);
+                            ui.close();
+                        }
+                    });
+                }
             } else {
                 if let (Some(tick), Some(pitch)) = (context_tick, context_pitch) {
                     if ui.button("Add note here").clicked() {
-                        let start = snap_tick(tick.raw(), snap).clamp(0, clip.length.raw() - 1);
+                        let start =
+                            snap_tick(tick.raw(), snap).clamp(0, (clip.length.raw() - 1).max(0));
                         let length = snap.ticks().min((clip.length.raw() - start).max(1)).max(1);
                         editor.add_note(
                             clip_id,
@@ -467,6 +589,16 @@ impl PianoRollState {
                         ui.close();
                     }
                     ui.separator();
+                }
+                if ui
+                    .add_enabled(
+                        editor.note_clipboard_len().is_some(),
+                        egui::Button::new("Paste at cursor"),
+                    )
+                    .clicked()
+                {
+                    editor.paste_notes_at_cursor();
+                    ui.close();
                 }
                 if ui.button("Select all notes").clicked() {
                     editor.select_all_notes(clip_id);
@@ -579,7 +711,7 @@ fn draw_notes(
     width: f32,
     notes: &[Note],
     selected: &BTreeSet<NoteId>,
-    preview: Option<Note>,
+    previews: &BTreeMap<NoteId, Note>,
     hovered: Option<NoteId>,
     px_per_tick: f32,
 ) {
@@ -587,14 +719,8 @@ fn draw_notes(
         origin,
         vec2(width, f32::from(PITCH_HIGH - PITCH_LOW + 1) * ROW_HEIGHT),
     );
-    let mut preview_drawn = false;
     for note in notes {
-        let note = preview
-            .filter(|preview| preview.id == note.id)
-            .unwrap_or(*note);
-        if preview.is_some_and(|preview| preview.id == note.id) {
-            preview_drawn = true;
-        }
+        let note = previews.get(&note.id).copied().unwrap_or(*note);
         if note.pitch < PITCH_LOW || note.pitch > PITCH_HIGH {
             continue;
         }
@@ -608,19 +734,14 @@ fn draw_notes(
         } else {
             Color32::from_rgb(64, 132, 214)
         };
-        draw_note(painter, rect, note.pitch, color, Some(note.id) == hovered);
-    }
-    if let Some(preview) = preview {
-        if !preview_drawn && preview.pitch >= PITCH_LOW && preview.pitch <= PITCH_HIGH {
-            let rect = note_rect(preview, origin, px_per_tick);
-            draw_note(
-                painter,
-                rect,
-                preview.pitch,
-                Color32::from_rgb(83, 184, 139),
-                true,
-            );
-        }
+        let previewing = previews.contains_key(&note.id);
+        draw_note(
+            painter,
+            rect,
+            note.pitch,
+            color,
+            previewing || Some(note.id) == hovered,
+        );
     }
 }
 
@@ -662,21 +783,45 @@ fn hit_note(notes: &[Note], position: Pos2, origin: Pos2, px_per_tick: f32) -> O
         .find(|note| note_rect(*note, origin, px_per_tick).contains(position))
 }
 
-fn moved_note(
-    note: Note,
+fn moved_notes(
+    notes: &[Note],
     delta_ticks: i64,
     delta_pitch: i32,
     clip_length: Tick,
     snap: Snap,
-) -> Note {
-    let start = snap_tick(note.start.raw() + delta_ticks, snap)
-        .clamp(0, (clip_length.raw() - note.length.raw()).max(0));
-    let pitch = (i32::from(note.pitch) + delta_pitch).clamp(0, 127) as u8;
-    Note {
-        start: Tick::from_raw(start),
-        pitch,
-        ..note
-    }
+) -> Vec<Note> {
+    let Some(min_start) = notes.iter().map(|note| note.start.raw()).min() else {
+        return Vec::new();
+    };
+    let max_end = notes
+        .iter()
+        .map(|note| note.start.raw().saturating_add(note.length.raw()))
+        .max()
+        .unwrap_or(min_start);
+    let min_pitch = notes
+        .iter()
+        .map(|note| i32::from(note.pitch))
+        .min()
+        .unwrap_or(0);
+    let max_pitch = notes
+        .iter()
+        .map(|note| i32::from(note.pitch))
+        .max()
+        .unwrap_or(0);
+
+    let lower_ticks = -min_start;
+    let upper_ticks = (clip_length.raw() - max_end).max(lower_ticks);
+    let delta_ticks = snap_tick(delta_ticks, snap).clamp(lower_ticks, upper_ticks);
+    let delta_pitch = delta_pitch.clamp(-min_pitch, 127 - max_pitch);
+
+    notes
+        .iter()
+        .map(|note| Note {
+            start: Tick::from_raw(note.start.raw() + delta_ticks),
+            pitch: (i32::from(note.pitch) + delta_pitch).clamp(0, 127) as u8,
+            ..*note
+        })
+        .collect()
 }
 
 fn resized_note(note: Note, delta_ticks: i64, clip_length: Tick, snap: Snap) -> Note {
@@ -746,20 +891,35 @@ mod tests {
     }
 
     #[test]
-    fn moving_a_note_clamps_to_the_clip() {
-        let moved = moved_note(note(), -PPQ * 2, 2, Tick::from_raw(PPQ * 4), Snap::Quarter);
-        assert_eq!(moved.start, Tick::ZERO);
-        assert_eq!(moved.pitch, 62);
+    fn moving_a_group_keeps_its_pattern_and_clamps_to_the_clip() {
+        let first = note();
+        let mut second = note();
+        second.id = NoteId::from_raw(2);
+        second.start = Tick::from_raw(2 * PPQ);
+        second.pitch = 64;
+        let group = [first, second];
 
-        let moved = moved_note(
-            note(),
-            PPQ * 4,
+        let moved = moved_notes(&group, PPQ, 2, Tick::from_raw(4 * PPQ), Snap::Quarter);
+        assert_eq!(moved[0].start, Tick::from_raw(2 * PPQ));
+        assert_eq!(moved[1].start, Tick::from_raw(3 * PPQ));
+        assert_eq!(moved[0].pitch, 62);
+        assert_eq!(moved[1].pitch, 66);
+
+        let moved = moved_notes(&group, -PPQ * 8, 2, Tick::from_raw(4 * PPQ), Snap::Quarter);
+        assert_eq!(moved[0].start, Tick::ZERO);
+        assert_eq!(moved[1].start, Tick::from_raw(PPQ));
+
+        let moved = moved_notes(
+            &group,
+            PPQ * 8,
             -100,
-            Tick::from_raw(PPQ * 4),
+            Tick::from_raw(4 * PPQ),
             Snap::Quarter,
         );
-        assert_eq!(moved.start, Tick::from_raw(PPQ * 3));
-        assert_eq!(moved.pitch, 0);
+        assert_eq!(moved[0].start, Tick::from_raw(2 * PPQ));
+        assert_eq!(moved[1].start, Tick::from_raw(3 * PPQ));
+        assert_eq!(moved[0].pitch, 0);
+        assert_eq!(moved[1].pitch, 4);
     }
 
     #[test]

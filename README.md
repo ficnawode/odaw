@@ -47,16 +47,18 @@ What works today:
 - `odaw-format`: versioned DTOs, postcard payloads, JSON manifests, and v1/v2 → v3
   migration. Track names, colors, mute, and solo are persisted.
 - `odaw-ui` / `odaw-app`: Ableton-like timeline with track headers, colors,
-  names, mute/solo, per-track gain/pan faders, a stereo master out strip, clip
-  move/resize/split/duplicate, marquee multi-selection, grid zoom and snapping,
-  MIDI note and audio waveform previews, and a collapsible/resizable piano roll
-  with drag-to-create, move, resize, Shift-drag marquee, right-click menus,
-  snap, trackpad zoom, undo, and redo. Click the ruler or empty timeline to seek
-  the red cursor; Ctrl+E splits the selection at the cursor. Tempo is editable
-  in the transport. Audio files can be dropped onto the timeline as clips with
-  waveform previews. Edits go through `Session`; structural edits are recompiled
-  and published to the realtime engine, while fader gestures update the live
-  parameter buffer and commit one value-only command on release.
+  names, mute/solo, per-track gain/pan faders with live stereo level meters, and
+  a single stereo master out strip in the timeline. Clips move/resize/split/
+  duplicate and support marquee multi-selection, grid zoom, and snapping. The
+  collapsible/resizable piano roll adds a note on a tap, marquee-selects on a
+  drag, and edits note groups with move, transpose, copy/paste, and duplicate.
+  It also has note resize, right-click menus, snap, trackpad zoom, undo, and
+  redo. Click the ruler or empty timeline to seek the red cursor; Ctrl+E splits
+  the selection at the cursor. Tempo is editable in the transport. Audio files
+  can be dropped onto the timeline as clips with waveform previews. Edits go
+  through `Session`; structural edits are recompiled and published to the
+  realtime engine, while fader gestures update the live parameter buffer and
+  commit one value-only command on release.
 - `odaw`: a CLI for create, inspect, rename, demo, validate, render, and play.
 - CI: formatting, clippy with warnings denied, and the workspace test suite.
 
@@ -65,7 +67,8 @@ with latency are rejected until compensation lands, the output device must
 support the project sample rate directly, imported audio clips are not played
 yet, MIDI notes are not recorded from hardware, track grouping is not
 implemented, there is no file dialog, no velocity lane, no loop transport, and
-no automation or plugin UI.
+no automation or plugin UI. Note group copy/paste stays within the selected MIDI
+clip.
 
 See [ROADMAP.md](ROADMAP.md) for the product path and
 [.opencode/DESIGN.md](.opencode/DESIGN.md) for the architecture.

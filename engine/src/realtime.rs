@@ -7,6 +7,7 @@ use rtrb::{Consumer, Producer, PushError, RingBuffer};
 use thiserror::Error;
 
 use crate::engine::{Engine, EngineError};
+use crate::meter::MeterBank;
 use crate::plan::CompiledProject;
 use crate::scheduler::{Scheduler, SchedulerError};
 
@@ -15,6 +16,7 @@ pub struct RealtimeState {
     pub engine: Engine,
     pub scheduler: Scheduler,
     pub end_frame: Option<u64>,
+    pub meters: MeterBank,
 }
 
 impl RealtimeState {
@@ -34,10 +36,12 @@ impl RealtimeState {
         end_frame: Option<u64>,
         start_frame: u64,
     ) -> Result<Self, RealtimeStateError> {
+        let meters = compiled.meters.clone();
         Ok(Self {
             engine: Engine::new_at(compiled, block_size, start_frame)?,
             scheduler: Scheduler::new(project)?,
             end_frame,
+            meters,
         })
     }
 }
@@ -69,6 +73,7 @@ pub struct RealtimeHandle {
     retired: Consumer<Box<RealtimeState>>,
     position: Arc<AtomicU64>,
     finished: Arc<AtomicBool>,
+    meters: MeterBank,
 }
 
 pub fn realtime(state: RealtimeState, capacity: usize) -> (RealtimeEngine, RealtimeHandle) {
@@ -78,6 +83,7 @@ pub fn realtime(state: RealtimeState, capacity: usize) -> (RealtimeEngine, Realt
     let position = Arc::new(AtomicU64::new(0));
     let finished = Arc::new(AtomicBool::new(false));
 
+    let meters = state.meters.clone();
     let engine = RealtimeEngine {
         commands: audio_commands,
         retired: audio_retired,
@@ -93,6 +99,7 @@ pub fn realtime(state: RealtimeState, capacity: usize) -> (RealtimeEngine, Realt
         retired,
         position,
         finished,
+        meters,
     };
     (engine, handle)
 }
@@ -248,9 +255,14 @@ impl RealtimeHandle {
     ) -> Result<(), RealtimeError> {
         state.engine.seek(start_frame);
         self.collect_retired();
+        self.meters = state.meters.clone();
         self.position.store(start_frame, Ordering::Relaxed);
         self.finished.store(false, Ordering::Release);
         self.send(ToAudio::Replace(Box::new(state)))
+    }
+
+    pub fn meter_levels(&self, node: odaw_core::NodeId) -> Option<(f32, f32)> {
+        self.meters.levels(node)
     }
 
     pub fn seek(&mut self, frame: u64) -> Result<(), RealtimeError> {
@@ -338,6 +350,7 @@ mod tests {
             CompiledProject {
                 plan,
                 params: ParamBuffer::new(),
+                meters: MeterBank::default(),
             },
             NonZeroUsize::new(64).unwrap(),
         )
@@ -346,6 +359,7 @@ mod tests {
             engine,
             scheduler: Scheduler::default(),
             end_frame,
+            meters: MeterBank::default(),
         }
     }
 
@@ -413,6 +427,59 @@ mod tests {
         audio.process(&mut output, 2, 48_000);
         assert_eq!(output, [0.75; 4]);
         handle.collect_retired();
+    }
+
+    #[test]
+    fn meters_are_shared_with_the_handle() {
+        #[derive(Debug)]
+        struct Metered {
+            meter: Arc<crate::Meter>,
+        }
+
+        impl DeviceProcessor for Metered {
+            fn process(&mut self, block: &mut Block<'_>) {
+                block.output.fill(0.5);
+                self.meter.store_block(block.output, block.channels);
+            }
+        }
+
+        let node = NodeId::from_raw(1);
+        let bank = MeterBank::new([node]);
+        let processor = Metered {
+            meter: bank.slot(node).expect("the bank has a meter"),
+        };
+        let plan = RenderPlan {
+            sample_rate: 48_000,
+            channels: 2,
+            steps: vec![PlanStep {
+                node,
+                inputs: Vec::new(),
+                output: 0,
+                event_target: None,
+                processor: Box::new(processor),
+            }],
+            master: Some(0),
+        };
+        let engine = Engine::new(
+            CompiledProject {
+                plan,
+                params: ParamBuffer::new(),
+                meters: bank.clone(),
+            },
+            NonZeroUsize::new(64).unwrap(),
+        )
+        .unwrap();
+        let state = RealtimeState {
+            engine,
+            scheduler: Scheduler::default(),
+            end_frame: None,
+            meters: bank,
+        };
+        let (mut audio, mut handle) = realtime(state, 8);
+        handle.play().unwrap();
+        let mut output = [0.0; 4];
+        audio.process(&mut output, 2, 48_000);
+        assert_eq!(handle.meter_levels(node), Some((0.5, 0.5)));
     }
 
     #[test]

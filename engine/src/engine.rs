@@ -25,7 +25,11 @@ impl Engine {
         block_size: NonZeroUsize,
         start_frame: u64,
     ) -> Result<Self, EngineError> {
-        let CompiledProject { plan, params } = compiled;
+        let CompiledProject {
+            plan,
+            params,
+            meters: _,
+        } = compiled;
         if plan.sample_rate == 0 {
             return Err(EngineError::ZeroSampleRate);
         }
@@ -311,6 +315,7 @@ mod tests {
                 master,
             },
             params: ParamBuffer::new(),
+            meters: crate::MeterBank::default(),
         }
     }
 

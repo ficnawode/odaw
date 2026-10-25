@@ -51,6 +51,16 @@ impl OdawApp {
         });
         let save = ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::S));
         let split = ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::E));
+        let copy = ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::C));
+        let paste = ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::V));
+        let select_all =
+            ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::A));
+        let duplicate =
+            ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::D));
+        let transpose_up = ctx.input(|input| input.key_pressed(egui::Key::ArrowUp));
+        let transpose_down = ctx.input(|input| input.key_pressed(egui::Key::ArrowDown));
+        let shift = ctx.input(|input| input.modifiers.shift);
+        let widget_focus = ctx.memory(|memory| memory.focused().is_some());
         let home = ctx.input(|input| input.key_pressed(egui::Key::Home));
         let delete = ctx.input(|input| {
             input.key_pressed(egui::Key::Delete) || input.key_pressed(egui::Key::Backspace)
@@ -76,6 +86,34 @@ impl OdawApp {
         if split {
             self.editor.split_selected_at_cursor();
             self.timeline.clear();
+        }
+        if copy {
+            self.editor.copy_selected_notes();
+        }
+        if paste {
+            self.editor.paste_notes_at_cursor();
+            self.piano_roll.clear();
+        }
+        if duplicate {
+            self.editor.duplicate_selected_notes();
+            self.piano_roll.clear();
+        }
+        if select_all {
+            if self.piano_roll_open {
+                if let Some(clip) = self.editor.selected_clip() {
+                    self.editor.select_all_notes(clip);
+                }
+            } else {
+                self.editor.select_all_clips();
+            }
+        }
+        if !widget_focus && !self.editor.session.selection().notes.is_empty() {
+            let semitones = if shift { 12 } else { 1 };
+            if transpose_up {
+                self.editor.transpose_selected_notes(semitones);
+            } else if transpose_down {
+                self.editor.transpose_selected_notes(-semitones);
+            }
         }
         if home {
             self.editor.set_cursor(Tick::ZERO);
@@ -223,9 +261,6 @@ impl OdawApp {
             }
         }
 
-        ui.separator();
-        self.master_inspector(ui, &project);
-
         if let Some(note) = self.editor.selected_note() {
             ui.separator();
             ui.label("Selected note");
@@ -284,7 +319,10 @@ impl OdawApp {
         });
 
         ui.label("Mixer");
-        self.mixer.gain(ui, &mut self.editor, track, false);
+        ui.horizontal(|ui| {
+            self.mixer.gain(ui, &mut self.editor, track, false);
+            self.mixer.meter(ui, &self.editor, track);
+        });
         self.mixer.pan(ui, &mut self.editor, track, false);
 
         ui.separator();
@@ -299,29 +337,6 @@ impl OdawApp {
                 .and_then(|node| node.kind.as_ref())
                 .map_or("device", NodeKind::as_str);
             ui.small(format!("• {kind}"));
-        }
-    }
-
-    fn master_inspector(&mut self, ui: &mut egui::Ui, project: &odaw_core::Project) {
-        ui.horizontal(|ui| {
-            ui.strong("Master out");
-            if let Some(master) = self.editor.master_node() {
-                let channels = project
-                    .nodes
-                    .get(&master)
-                    .and_then(|node| node.ports.iter().next())
-                    .map_or(2, |port| port.layout.channels());
-                ui.small(format!("{channels} ch"));
-            }
-        });
-        match self.editor.master_node() {
-            Some(master) => {
-                self.mixer.gain(ui, &mut self.editor, master, false);
-                self.mixer.pan(ui, &mut self.editor, master, false);
-            }
-            None => {
-                ui.small("This project has no master output. Add a track to create one.");
-            }
         }
     }
 
@@ -376,7 +391,7 @@ impl OdawApp {
                 ui.label(status);
             } else {
                 ui.label(
-                    "Space play/stop · Ctrl+Z undo · Ctrl+Shift+Z redo · drag clips/notes · right-click menus",
+                    "Space play/stop · Ctrl+E split · Ctrl+C/V notes · Up/Down transpose · drag clips/notes · right-click menus",
                 );
             }
             if let Some(clip) = self.editor.selected_clip() {
@@ -415,7 +430,7 @@ impl eframe::App for OdawApp {
                         }
                         ui.separator();
                         ui.small(
-                            "drag empty grid to create · drag notes to move · right-click menu",
+                            "tap to add a note · drag empty space to select · drag notes to move · right-click menu",
                         );
                     });
                     self.piano_roll.show(ui, &mut self.editor);
@@ -477,7 +492,7 @@ impl eframe::App for OdawApp {
 
         self.rename_window(ctx);
 
-        if self.editor.playing {
+        if self.editor.playing || self.mixer.active() {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
     }

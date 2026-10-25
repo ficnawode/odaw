@@ -865,6 +865,16 @@ Resolved (items already stated in section 3 are not repeated):
     scheduling and oscillator phase restart cleanly without recompiling the
     graph. The clip split/duplicate workflow is expressed as ordinary commands,
     so `Ctrl+E` and context-menu splits are undoable.
+18. `[CONFIRMED]` Audio-to-UI metering uses a `MeterBank` of atomic peaks shared
+    by the compiled channel strips and the realtime handle. Channel strips write
+    post-fader L/R peaks per block; the UI reads them lock-free and applies its
+    own release decay. The audio thread never allocates, locks, or waits for the
+    UI, and the meter bank is replaced together with the engine state.
+19. `[CONFIRMED]` The piano roll uses a pointer gesture model rather than a
+    draw/select tool mode: a tap on empty grid adds a snap-length note, a drag
+    on empty grid marquee-selects notes, and a drag on a selected note moves the
+    whole selection. Group transpose, copy/paste, duplicate, and move are
+    ordinary note commands, so they undo and replay deterministically.
 
 Still open:
 
