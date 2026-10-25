@@ -2,6 +2,7 @@ use std::num::NonZeroUsize;
 
 use odaw_compile::{CompileError, Compiler};
 use odaw_core::{Project, TempoError, Tick};
+use odaw_dsp::AudioSources;
 use odaw_engine::{Engine, EngineError, Scheduler, SchedulerError};
 use thiserror::Error;
 
@@ -22,7 +23,15 @@ pub fn render_project(
     project: &Project,
     options: RenderOptions,
 ) -> Result<RenderedAudio, RenderError> {
-    let compiled = Compiler::builtin().compile(project)?;
+    render_project_with_audio(project, options, &AudioSources::default())
+}
+
+pub fn render_project_with_audio(
+    project: &Project,
+    options: RenderOptions,
+    audio_sources: &AudioSources,
+) -> Result<RenderedAudio, RenderError> {
+    let compiled = Compiler::builtin().compile_with_audio(project, audio_sources)?;
     let sample_rate = compiled.plan.sample_rate;
     let channels = compiled.plan.channels;
     let mut engine = Engine::new(compiled, options.block_size)?;

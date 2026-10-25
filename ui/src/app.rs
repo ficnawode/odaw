@@ -2,10 +2,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use eframe::egui::{self, Color32};
-use odaw_core::{Node, NodeId, NodeKind, PPQ, Tick};
+use odaw_core::{ClipContent, Node, NodeId, NodeKind, PPQ, Tick};
 
 use crate::editor::{Editor, TRACK_COLORS};
 use crate::mixer::MixerState;
+use crate::options;
 use crate::piano_roll::{PianoRollState, note_name};
 use crate::timeline::{self, TimelineState};
 
@@ -13,6 +14,7 @@ pub struct OdawApp {
     editor: Editor,
     piano_roll: PianoRollState,
     piano_roll_open: bool,
+    track_options_open: bool,
     mixer: MixerState,
     timeline: TimelineState,
     rename: Option<RenameState>,
@@ -31,11 +33,21 @@ impl OdawApp {
             editor: Editor::new(path),
             piano_roll: PianoRollState::default(),
             piano_roll_open: true,
+            track_options_open: false,
             mixer: MixerState::default(),
             timeline: TimelineState::default(),
             rename: None,
             tempo_edit: None,
         }
+    }
+
+    fn piano_roll_visible(&self) -> bool {
+        self.piano_roll_open
+            && !self.track_options_open
+            && self
+                .editor
+                .selected_clip_any()
+                .is_some_and(|(_, clip)| matches!(clip.content, ClipContent::Midi { .. }))
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
@@ -99,7 +111,7 @@ impl OdawApp {
             self.piano_roll.clear();
         }
         if select_all {
-            if self.piano_roll_open {
+            if self.piano_roll_visible() {
                 if let Some(clip) = self.editor.selected_clip() {
                     self.editor.select_all_notes(clip);
                 }
@@ -417,29 +429,81 @@ impl eframe::App for OdawApp {
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             self.status(ui);
         });
+        let selected_any = self.editor.selected_clip_any_owned();
+        let clip_is_midi = selected_any
+            .as_ref()
+            .is_some_and(|(_, clip)| matches!(clip.content, ClipContent::Midi { .. }));
+        let clip_is_audio = selected_any
+            .as_ref()
+            .is_some_and(|(_, clip)| matches!(clip.content, ClipContent::Audio { .. }));
+        let selected_track = self.editor.selected_track();
+        let piano_visible = self.piano_roll_open && !self.track_options_open && clip_is_midi;
+        let options_visible = self.piano_roll_open && !piano_visible;
+
         if self.piano_roll_open {
-            let piano_height = (ctx.available_rect().height() * 0.5).clamp(240.0, 620.0);
-            egui::TopBottomPanel::bottom("piano_roll_panel")
+            let panel_height = (ctx.available_rect().height() * 0.5).clamp(240.0, 620.0);
+            let mut rename_request = None;
+            egui::TopBottomPanel::bottom("bottom_panel")
                 .resizable(true)
-                .default_height(piano_height)
+                .default_height(panel_height)
                 .min_height(180.0)
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
-                        if ui.button("Hide piano roll").clicked() {
+                        let title = if piano_visible {
+                            "Piano roll"
+                        } else if clip_is_audio && !self.track_options_open {
+                            "Audio clip"
+                        } else {
+                            "Track options"
+                        };
+                        ui.strong(title);
+                        if ui.button("Hide panel").clicked() {
                             self.piano_roll_open = false;
                         }
+                        if clip_is_midi {
+                            if self.track_options_open {
+                                if ui.button("Piano roll").clicked() {
+                                    self.track_options_open = false;
+                                }
+                            } else if ui.button("Track options").clicked() {
+                                self.track_options_open = true;
+                            }
+                        }
                         ui.separator();
-                        ui.small(
-                            "tap to add a note · drag empty space to select · drag notes to move · right-click menu",
-                        );
+                        if piano_visible {
+                            ui.small(
+                                "tap to add a note · drag empty space to select · drag notes to move · right-click menu",
+                            );
+                        } else {
+                            ui.small("track mixer, colors, clip list, and audio clip details");
+                        }
                     });
-                    self.piano_roll.show(ui, &mut self.editor);
+                    if piano_visible {
+                        self.piano_roll.show(ui, &mut self.editor);
+                    } else if options_visible {
+                        options::show(
+                            ui,
+                            &mut self.editor,
+                            &mut self.mixer,
+                            selected_track,
+                            selected_any,
+                            &mut rename_request,
+                        );
+                    }
                 });
+
+            if let Some(track) = rename_request {
+                let name = self.editor.session.project().nodes.get(&track).map_or_else(
+                    || format!("Track {}", track.raw()),
+                    |node| track_name(node, track),
+                );
+                self.rename = Some(RenameState { track, name });
+            }
         } else {
-            egui::TopBottomPanel::bottom("piano_roll_collapsed")
+            egui::TopBottomPanel::bottom("bottom_collapsed")
                 .exact_height(28.0)
                 .show(ctx, |ui| {
-                    if ui.button("Show piano roll").clicked() {
+                    if ui.button("Show panel").clicked() {
                         self.piano_roll_open = true;
                     }
                 });

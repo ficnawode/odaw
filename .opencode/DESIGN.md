@@ -875,6 +875,21 @@ Resolved (items already stated in section 3 are not repeated):
     on empty grid marquee-selects notes, and a drag on a selected note moves the
     whole selection. Group transpose, copy/paste, duplicate, and move are
     ordinary note commands, so they undo and replay deterministically.
+20. `[CONFIRMED]` Audio clips compile into a per-track `AudioClipPlayer` source
+    that is summed at the channel-strip input beside the rack output. Clips stay
+    in the document as asset ids plus source `Frames`; decoded interleaved
+    samples are runtime data supplied to the compiler, never document state.
+    The player reads preloaded samples and linearly resamples to the project
+    rate on the audio thread. Missing sources are silent, not a compile error,
+    so a project remains loadable while assets are unavailable.
+21. `[CONFIRMED]` Imported audio blobs are content-addressed and copied into
+    `<container>/assets/<asset-id>.<ext>` after the project transaction is
+    written. Reloading finds them by asset id, decodes samples and peaks, and
+    feeds the same compiler path as a fresh import.
+22. `[CONFIRMED]` The bottom panel is contextual: MIDI clips show the piano
+    roll, audio clips show a waveform/detail view plus track options, and a
+    track with no selected clip shows track options. The roll remains one
+    toggle away for MIDI tracks and the panel stays user-resizable.
 
 Still open:
 

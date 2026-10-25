@@ -1,6 +1,7 @@
 pub mod app;
 pub mod editor;
 pub mod mixer;
+pub mod options;
 pub mod piano_roll;
 pub mod timeline;
 

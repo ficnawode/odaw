@@ -131,15 +131,19 @@ Implemented: native window, transport with editable tempo and bar/beat display,
 Ableton-like timeline with track headers inside the arrangement, track colors,
 rename, mute/solo, add/delete track, add MIDI clip, clip move/resize/split/
 duplicate, marquee multi-selection, grid zoom/snapping, MIDI and audio previews,
-drag/drop WAV/MP3 import with waveform previews, click/drag ruler seeking,
+drag/drop WAV/MP3 import with waveform previews and realtime audio-clip
+playback through the track strip, a contextual bottom panel (piano roll for
+MIDI, audio clip waveform/details, and track options), click/drag ruler seeking,
 split-at-cursor, per-track gain/pan faders with post-fader stereo level meters,
 a single stereo master out strip in the timeline, inspector, and realtime
 publish on structural edits. Scrubbing uses the realtime seek command, fader
 gestures commit one value-only command on release, and meters travel from the
-audio thread to the UI through atomics.
+audio thread to the UI through atomics. Saved projects copy their audio blobs
+into the container so waveforms and playback survive a reload.
 
 Remaining: drag-to-reorder tracks, grouping/folders, arm, track multi-select,
-parameter automation UI, file dialogs, loop transport, and audio-clip playback.
+parameter automation UI, file dialogs, loop transport, audio clip fades, and
+time-stretch/warping.
 
 ## M5 — Piano roll
 
@@ -234,9 +238,9 @@ move ahead of CLAP, but the device interface must not fork.
 
 ## Immediate next steps after this commit
 
-1. Commit this tree as the transport/mixer commit.
-2. Add audio-clip playback so dragged WAV/MP3 clips are audible.
-3. Add loop playback and a loop region editor.
+1. Commit this tree as the audio-clip playback commit.
+2. Add loop playback and a loop region editor.
+3. Add audio clip fades, gain, time-stretch, and warping.
 4. Add a velocity lane, quantize, and playhead follow to the piano roll.
 5. Add track grouping/folders and drag-to-reorder.
 6. Add automation editing.

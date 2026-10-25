@@ -37,12 +37,14 @@ What works today:
   executor, note events, a sample-accurate scheduler, and a lock-free realtime
   handoff.
 - `odaw-dsp`: primitive in-tree devices (`builtin.sine`, `builtin.poly`,
-  `builtin.gain`, `builtin.pass`), a built-in track/master channel strip with
-  dB gain and stereo pan, and a demo song.
+  `builtin.gain`, `builtin.pass`), an audio-clip player with linear resampling,
+  a built-in track/master channel strip with dB gain and stereo pan, and a demo
+  song.
 - `odaw-compile`: rack flattening, deterministic DAG ordering, cycle detection,
   port/channel checks, and plan construction.
 - `odaw-render`: deterministic offline rendering.
-- `odaw-io`: a 16-bit PCM WAV writer.
+- `odaw-io`: WAV writing plus WAV/MP3 decoding to interleaved samples, waveform
+  peaks, and duration.
 - `odaw-platform`: `cpal` output with f32/i16/u16 conversion.
 - `odaw-format`: versioned DTOs, postcard payloads, JSON manifests, and v1/v2 → v3
   migration. Track names, colors, mute, and solo are persisted.
@@ -55,20 +57,24 @@ What works today:
   It also has note resize, right-click menus, snap, trackpad zoom, undo, and
   redo. Click the ruler or empty timeline to seek the red cursor; Ctrl+E splits
   the selection at the cursor. Tempo is editable in the transport. Audio files
-  can be dropped onto the timeline as clips with waveform previews. Edits go
-  through `Session`; structural edits are recompiled and published to the
-  realtime engine, while fader gestures update the live parameter buffer and
-  commit one value-only command on release.
+  can be dropped onto the timeline as clips with waveform previews and played
+  back through the track's gain/pan strip. The bottom panel follows the
+  selection: the piano roll for MIDI clips, an audio clip detail view with a
+  large waveform for audio clips, and track options (colors, mute/solo, mixer,
+  clips, devices) in both cases. Edits go through `Session`; structural edits
+  are recompiled and published to the realtime engine, while fader gestures
+  update the live parameter buffer and commit one value-only command on
+  release.
 - `odaw`: a CLI for create, inspect, rename, demo, validate, render, and play.
 - CI: formatting, clippy with warnings denied, and the workspace test suite.
 
 Current limits: mono/stereo only, in-tree devices must live in a rack, devices
 with latency are rejected until compensation lands, the output device must
-support the project sample rate directly, imported audio clips are not played
-yet, MIDI notes are not recorded from hardware, track grouping is not
-implemented, there is no file dialog, no velocity lane, no loop transport, and
-no automation or plugin UI. Note group copy/paste stays within the selected MIDI
-clip.
+support the project sample rate directly, audio clips are not time-stretched
+when the tempo changes, MIDI notes are not recorded from hardware, track
+grouping is not implemented, there is no file dialog, no velocity lane, no loop
+transport, and no automation or plugin UI. Note group copy/paste stays within
+the selected MIDI clip.
 
 See [ROADMAP.md](ROADMAP.md) for the product path and
 [.opencode/DESIGN.md](.opencode/DESIGN.md) for the architecture.

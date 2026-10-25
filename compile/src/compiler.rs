@@ -1,11 +1,15 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+use std::sync::Arc;
 
 use odaw_core::{
-    ChannelLayout, EdgeId, Node, NodeId, NodeKind, NodeRole, ParamAddress, ParamId, ParamValue,
-    Port, PortDirection, PortId, Project, ValidationError,
+    ChannelLayout, ClipContent, EdgeId, Node, NodeId, NodeKind, NodeRole, ParamAddress, ParamId,
+    ParamValue, Port, PortDirection, PortId, Project, TempoError, Tick, ValidationError,
 };
-use odaw_dsp::{ChannelStrip, NodeRegistry, STRIP_GAIN_PARAM, STRIP_PAN_PARAM, Silence};
+use odaw_dsp::{
+    AudioClipPlayer, AudioSources, ChannelStrip, NodeRegistry, PlayableClip, STRIP_GAIN_PARAM,
+    STRIP_PAN_PARAM, Silence,
+};
 use odaw_engine::{
     BufferId, CompiledProject, DeviceProcessor, MeterBank, ParamBuffer, PlanStep, RenderPlan,
 };
@@ -34,6 +38,14 @@ impl Compiler {
     }
 
     pub fn compile(&self, project: &Project) -> Result<CompiledProject, CompileError> {
+        self.compile_with_audio(project, &AudioSources::default())
+    }
+
+    pub fn compile_with_audio(
+        &self,
+        project: &Project,
+        audio_sources: &AudioSources,
+    ) -> Result<CompiledProject, CompileError> {
         project.validate()?;
 
         let masters: Vec<NodeId> = project
@@ -183,6 +195,56 @@ impl Compiler {
                 previous_unit = Some(unit_id);
             }
 
+            // Audio clips are summed at the track input, before the channel
+            // strip, so the track fader and meter see both MIDI and audio.
+            let mut clip_units = Vec::new();
+            if node.role == NodeRole::Track {
+                let mut clips = Vec::new();
+                for clip_id in &node.clips {
+                    let Some(clip) = project.clips.get(clip_id) else {
+                        continue;
+                    };
+                    let ClipContent::Audio {
+                        asset,
+                        source_start,
+                        source_length,
+                    } = &clip.content
+                    else {
+                        continue;
+                    };
+                    let Some(audio) = audio_sources.get(asset) else {
+                        continue;
+                    };
+                    let start_frame = project.tempo.tick_to_frames(clip.start)?.raw().max(0) as u64;
+                    let end_tick =
+                        Tick::from_raw(clip.start.raw().saturating_add(clip.length.raw()));
+                    let end_frame = project.tempo.tick_to_frames(end_tick)?.raw().max(0) as u64;
+                    if end_frame <= start_frame {
+                        continue;
+                    }
+                    clips.push(PlayableClip::new(
+                        Arc::clone(audio),
+                        start_frame,
+                        end_frame,
+                        source_start.raw().max(0) as u64,
+                        source_length.raw().max(0) as u64,
+                    ));
+                }
+                if !clips.is_empty() {
+                    let unit = units.len();
+                    units.push(Unit {
+                        node: *owner,
+                        event_target: None,
+                        processor: Some(Box::new(AudioClipPlayer::new(
+                            project.meta.sample_rate,
+                            clips,
+                        ))),
+                        dependencies: Vec::new(),
+                    });
+                    clip_units.push(unit);
+                }
+            }
+
             // Every track, bus, folder, and the master ends in a channel strip.
             // Keeping it in the plan (rather than as a document device) means
             // gain and pan stay value-only parameters and never rebuild audio.
@@ -191,11 +253,13 @@ impl Compiler {
                 || ChannelStrip::new(*owner),
                 |meter| ChannelStrip::new(*owner).with_meter(meter),
             );
+            let mut dependencies: Vec<UnitId> = previous_unit.into_iter().collect();
+            dependencies.extend(clip_units);
             units.push(Unit {
                 node: *owner,
                 event_target: None,
                 processor: Some(Box::new(strip)),
-                dependencies: previous_unit.into_iter().collect(),
+                dependencies,
             });
             owner_output.insert(*owner, strip_unit);
             if node.rack.is_empty() {
@@ -417,6 +481,8 @@ fn topological_order(units: &[Unit]) -> Result<Vec<UnitId>, CompileError> {
 pub enum CompileError {
     #[error(transparent)]
     Validation(#[from] ValidationError),
+    #[error(transparent)]
+    Tempo(#[from] TempoError),
     #[error("project must contain exactly one master node, found {0}")]
     MasterCount(usize),
     #[error("master node {0} has no audio port")]
@@ -606,6 +672,67 @@ mod tests {
         assert!(compiled.meters.slot(NodeId::from_raw(1)).is_some());
         assert!(compiled.meters.slot(NodeId::from_raw(4)).is_some());
         assert!(compiled.meters.slot(NodeId::from_raw(2)).is_none());
+    }
+
+    #[test]
+    fn audio_clips_are_mixed_into_their_track() {
+        use std::num::NonZeroUsize;
+
+        use odaw_core::{Asset, AssetId, AssetKind, Clip, ClipContent, ClipId, Frames};
+        use odaw_dsp::AudioAsset;
+        use odaw_engine::Engine;
+
+        let mut project = Project::empty("audio", 48_000, 0).unwrap();
+        let (master_id, master_node) = master(1);
+        project.nodes.insert(master_id, master_node);
+        let track_id = NodeId::from_raw(2);
+        let clip_id = ClipId::from_raw(3);
+        project.nodes.insert(
+            track_id,
+            Node::new(NodeRole::Track)
+                .with_ports([
+                    Port::input(PortId::from_raw(0), ChannelLayout::Stereo),
+                    Port::output(PortId::from_raw(1), ChannelLayout::Stereo),
+                ])
+                .with_clips([clip_id]),
+        );
+        let asset_id = AssetId::from_bytes([7; 32]);
+        project.assets.insert(
+            asset_id,
+            Asset {
+                name: "tone.wav".into(),
+                kind: AssetKind::Audio,
+            },
+        );
+        project.clips.insert(
+            clip_id,
+            Clip {
+                node: track_id,
+                start: Tick::ZERO,
+                length: Tick::from_raw(4 * odaw_core::PPQ),
+                content: ClipContent::Audio {
+                    asset: asset_id,
+                    source_start: Frames::ZERO,
+                    source_length: Frames::from_raw(2_000),
+                },
+            },
+        );
+        connect(&mut project, 4, track_id, master_id);
+
+        let mut sources = AudioSources::new();
+        sources.insert(
+            asset_id,
+            Arc::new(AudioAsset::from_samples(48_000, 2, vec![0.5; 2 * 2_000]).unwrap()),
+        );
+        let compiled = Compiler::builtin()
+            .compile_with_audio(&project, &sources)
+            .unwrap();
+        assert_eq!(compiled.plan.steps.len(), 3);
+
+        let mut engine = Engine::new(compiled, NonZeroUsize::new(8).unwrap()).unwrap();
+        let mut output = vec![0.0; 8];
+        engine.process_block(4, &[], &mut output).unwrap();
+        assert_eq!(output, vec![0.5; 8]);
     }
 
     #[test]

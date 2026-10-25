@@ -13,7 +13,7 @@ use odaw_core::{
     NodeId, NodeKind, NodePort, NodeRole, Note, NoteId, PPQ, ParamAddress, ParamId, ParamValue,
     Port, PortDirection, PortId, Project, TempoPoint, Tick,
 };
-use odaw_dsp::demo;
+use odaw_dsp::{AudioAsset, AudioSources, demo};
 use odaw_engine::{RealtimeEngine, RealtimeHandle, RealtimeState, realtime};
 use odaw_format::Container;
 use odaw_platform::{AudioBackend, AudioCallback};
@@ -49,8 +49,7 @@ struct NoteClipboard {
 pub struct ImportedAudio {
     pub path: PathBuf,
     pub peaks: Arc<[f32]>,
-    pub sample_rate: u32,
-    pub frames: u64,
+    pub asset: Arc<AudioAsset>,
 }
 
 struct AudioSession {
@@ -121,6 +120,19 @@ impl Editor {
             .map(|audio| Arc::clone(&audio.peaks))
     }
 
+    pub fn audio_asset(&self, asset: AssetId) -> Option<Arc<AudioAsset>> {
+        self.imported
+            .get(&asset)
+            .map(|audio| Arc::clone(&audio.asset))
+    }
+
+    pub fn audio_sources(&self) -> AudioSources {
+        self.imported
+            .iter()
+            .map(|(id, audio)| (*id, Arc::clone(&audio.asset)))
+            .collect()
+    }
+
     pub fn import_audio(&mut self, path: &Path, track: NodeId, tick: Tick) {
         let extension = path
             .extension()
@@ -134,9 +146,12 @@ impl Editor {
             let hash = odaw_io::hash_file(path).map_err(|error| error.to_string())?;
             let asset = AssetId::from_bytes(hash);
             let decoded = odaw_io::decode_peaks(path, 2048).map_err(|error| error.to_string())?;
-            if decoded.sample_rate == 0 || decoded.frames == 0 {
+            if decoded.sample_rate == 0 || decoded.frames == 0 || decoded.channels == 0 {
                 return Err("the audio file contains no samples".to_owned());
             }
+            let samples: Arc<[f32]> = decoded.samples.into();
+            let audio = AudioAsset::new(decoded.sample_rate, decoded.channels, samples)
+                .ok_or_else(|| "the audio file contains no usable samples".to_owned())?;
             let project = self.session.project();
             let node = project
                 .nodes
@@ -189,8 +204,7 @@ impl Editor {
                 ImportedAudio {
                     path: path.to_path_buf(),
                     peaks: decoded.peaks.into(),
-                    sample_rate: decoded.sample_rate,
-                    frames: decoded.frames,
+                    asset: Arc::new(audio),
                 },
             );
             let result = self.session.apply_commands(commands, "Import audio");
@@ -199,10 +213,7 @@ impl Editor {
             }
             self.select_track(track);
             self.selected_clip = Some(clip_id);
-            self.status = Some(format!(
-                "imported {} (audio playback pending)",
-                path.display()
-            ));
+            self.status = Some(format!("imported {}", path.display()));
             Ok(())
         })();
         if let Err(error) = result {
@@ -238,15 +249,19 @@ impl Editor {
                 .find(|path| path.file_stem().is_some_and(|stem| stem == hex.as_str()))
             {
                 if let Ok(decoded) = odaw_io::decode_peaks(path, 2048) {
-                    self.imported.insert(
-                        id,
-                        ImportedAudio {
-                            path: path.clone(),
-                            peaks: decoded.peaks.into(),
-                            sample_rate: decoded.sample_rate,
-                            frames: decoded.frames,
-                        },
-                    );
+                    let samples: Arc<[f32]> = decoded.samples.into();
+                    if let Some(audio) =
+                        AudioAsset::new(decoded.sample_rate, decoded.channels, samples)
+                    {
+                        self.imported.insert(
+                            id,
+                            ImportedAudio {
+                                path: path.clone(),
+                                peaks: decoded.peaks.into(),
+                                asset: Arc::new(audio),
+                            },
+                        );
+                    }
                 }
             }
         }
@@ -289,7 +304,9 @@ impl Editor {
 
     fn create_audio(&self) -> Result<AudioSession, String> {
         let project = self.session.project();
-        let (state, end_frame) = prepare_state_at(project, frames_at(project, self.cursor))?;
+        let sources = self.audio_sources();
+        let (state, end_frame) =
+            prepare_state_at(project, frames_at(project, self.cursor), &sources)?;
         let sample_rate = state.engine.sample_rate();
         let channels = u16::try_from(state.engine.channels())
             .map_err(|_| "unsupported channel count".to_owned())?;
@@ -365,8 +382,9 @@ impl Editor {
         let needs_state = self.audio.as_ref().is_some_and(|audio| {
             audio.handle.finished() || audio.handle.position() != cursor_frame
         });
+        let sources = self.audio_sources();
         let prepared = if needs_state {
-            match prepare_state_at(&project, cursor_frame) {
+            match prepare_state_at(&project, cursor_frame, &sources) {
                 Ok(state) => Some(state),
                 Err(error) => {
                     self.audio_error = Some(error);
@@ -446,10 +464,11 @@ impl Editor {
         let was_playing = self.playing;
         let project = self.session.project().clone();
         let start = frames_at(&project, self.cursor);
+        let sources = self.audio_sources();
         let Some(audio) = &mut self.audio else {
             return;
         };
-        match prepare_state_at(&project, start) {
+        match prepare_state_at(&project, start, &sources) {
             Ok((state, end_frame)) => {
                 if let Err(error) = audio.handle.publish_at(state, start) {
                     self.audio_error = Some(error.to_string());
@@ -592,11 +611,75 @@ impl Editor {
         match Container::new(&path).save(self.session.project()) {
             Ok(()) => {
                 self.path = Some(path.clone());
-                self.status = Some(format!("saved {}", path.display()));
+                let assets = match self.store_audio_assets(&path) {
+                    Ok(count) => count,
+                    Err(error) => {
+                        self.error = Some(error);
+                        return;
+                    }
+                };
+                self.status = Some(if assets == 0 {
+                    format!("saved {}", path.display())
+                } else {
+                    format!("saved {} ({assets} audio asset(s))", path.display())
+                });
                 self.error = None;
             }
             Err(error) => self.error = Some(error.to_string()),
         }
+    }
+
+    /// Copy imported audio blobs into the container after the project itself
+    /// has been written. Asset ids are content hashes, so the destination name
+    /// is stable and reloading can find the samples without project metadata.
+    fn store_audio_assets(&self, root: &Path) -> Result<usize, String> {
+        let directory = root.join("assets");
+        std::fs::create_dir_all(&directory)
+            .map_err(|error| format!("could not create {}: {error}", directory.display()))?;
+        let mut copied = 0;
+        for (id, audio) in &self.imported {
+            let hex = id.to_hex();
+            let extension = audio
+                .path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .map(str::to_ascii_lowercase)
+                .unwrap_or_default();
+            let file_name = if extension.is_empty() {
+                hex.clone()
+            } else {
+                format!("{hex}.{extension}")
+            };
+            let destination = directory.join(&file_name);
+            if audio.path == destination {
+                continue;
+            }
+            if audio.path.parent().is_some_and(|parent| {
+                parent == directory
+                    && audio
+                        .path
+                        .file_stem()
+                        .is_some_and(|stem| stem == hex.as_str())
+            }) {
+                continue;
+            }
+            if !audio.path.is_file() {
+                return Err(format!(
+                    "audio asset {} is missing at {}",
+                    hex,
+                    audio.path.display()
+                ));
+            }
+            std::fs::copy(&audio.path, &destination).map_err(|error| {
+                format!(
+                    "could not copy {} to {}: {error}",
+                    audio.path.display(),
+                    destination.display()
+                )
+            })?;
+            copied += 1;
+        }
+        Ok(copied)
     }
 
     pub fn undo(&mut self) {
@@ -766,6 +849,35 @@ impl Editor {
             .clips
             .get(&clip)
             .map(|value| (clip, value))
+    }
+
+    /// The clip the timeline and the bottom panel should describe. Unlike
+    /// `selected_clip_data`, this keeps audio clips instead of falling back to
+    /// the first MIDI clip on the track.
+    pub fn selected_clip_any(&self) -> Option<(ClipId, &Clip)> {
+        let project = self.session.project();
+        if let Some(id) = self.session.selection().clips.iter().next() {
+            if let Some(clip) = project.clips.get(id) {
+                return Some((*id, clip));
+            }
+        }
+        if let Some(id) = self.selected_clip {
+            if let Some(clip) = project.clips.get(&id) {
+                return Some((id, clip));
+            }
+        }
+        let track = self.selected_track()?;
+        project
+            .nodes
+            .get(&track)?
+            .clips
+            .iter()
+            .find_map(|id| project.clips.get(id).map(|clip| (*id, clip)))
+    }
+
+    pub fn selected_clip_any_owned(&self) -> Option<(ClipId, Clip)> {
+        self.selected_clip_any()
+            .map(|(id, clip)| (id, clip.clone()))
     }
 
     pub fn first_midi_clip(&self, track: NodeId) -> Option<ClipId> {
@@ -1457,13 +1569,14 @@ impl Editor {
     }
 
     fn rebuild_audio(&mut self) {
-        let Some(audio) = &mut self.audio else {
-            return;
-        };
         let was_playing = self.playing;
         let project = self.session.project().clone();
         let start = frames_at(&project, self.cursor);
-        match prepare_state_at(&project, start) {
+        let sources = self.audio_sources();
+        let Some(audio) = &mut self.audio else {
+            return;
+        };
+        match prepare_state_at(&project, start, &sources) {
             Ok((state, end_frame)) => {
                 if let Err(error) = audio.handle.publish_at(state, start) {
                     self.audio_error = Some(error.to_string());
@@ -1498,9 +1611,13 @@ fn frames_at(project: &Project, tick: Tick) -> u64 {
         .unwrap_or(0)
 }
 
-fn prepare_state_at(project: &Project, start_frame: u64) -> Result<(RealtimeState, u64), String> {
+fn prepare_state_at(
+    project: &Project,
+    start_frame: u64,
+    audio_sources: &AudioSources,
+) -> Result<(RealtimeState, u64), String> {
     let compiled = Compiler::builtin()
-        .compile(project)
+        .compile_with_audio(project, audio_sources)
         .map_err(|error| error.to_string())?;
     let sample_rate = compiled.plan.sample_rate;
     let end_frame = project_end_frame(project)
@@ -1731,7 +1848,74 @@ mod tests {
         assert_eq!(editor.session.project().clips.len(), 2);
         let asset = *editor.session.project().assets.keys().next().unwrap();
         assert!(editor.imported_audio(asset).is_some());
-        assert!(editor.selected_clip().is_some());
+        let sources = editor.audio_sources();
+        let decoded = sources.get(&asset).unwrap();
+        assert_eq!(decoded.sample_rate, 48_000);
+        assert_eq!(decoded.channels, 2);
+        assert_eq!(decoded.frames, frames);
+        assert!(editor.session.project().clips.values().any(|clip| matches!(
+            &clip.content,
+            ClipContent::Audio { asset: value, .. } if *value == asset
+        )));
+        let (selected, _) = editor.selected_clip_any().unwrap();
+        assert!(matches!(
+            editor.session.project().clips[&selected].content,
+            ClipContent::Audio { .. }
+        ));
+    }
+
+    #[test]
+    fn saving_and_reloading_audio_keeps_the_asset_and_waveform() {
+        use odaw_io::{WavSpec, write_wav};
+        use std::fs::File;
+        use std::io::BufWriter;
+        use tempfile::TempDir;
+
+        let directory = TempDir::new().unwrap();
+        let wav = directory.path().join("tone.wav");
+        let frames = 4_800;
+        let mut samples = Vec::with_capacity(frames * 2);
+        for frame in 0..frames {
+            let value = (frame as f32 * 330.0 * std::f32::consts::TAU / 48_000.0).sin() * 0.3;
+            samples.push(value);
+            samples.push(value);
+        }
+        write_wav(
+            BufWriter::new(File::create(&wav).unwrap()),
+            WavSpec {
+                sample_rate: 48_000,
+                channels: 2,
+            },
+            &samples,
+        )
+        .unwrap();
+
+        let project = directory.path().join("audio.odaw");
+        let mut editor = test_editor();
+        editor.path = Some(project.clone());
+        editor.import_audio(&wav, NodeId::from_raw(1), Tick::ZERO);
+        let asset = *editor.session.project().assets.keys().next().unwrap();
+        editor.save();
+        assert!(editor.error.is_none(), "{:?}", editor.error);
+
+        let hex = asset.to_hex();
+        let stored = std::fs::read_dir(project.join("assets"))
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .any(|entry| {
+                entry
+                    .path()
+                    .file_stem()
+                    .is_some_and(|stem| stem == hex.as_str())
+            });
+        assert!(stored);
+
+        let reloaded = Editor::new(Some(project));
+        assert!(reloaded.audio_peaks(asset).is_some());
+        assert_eq!(
+            reloaded.audio_asset(asset).map(|audio| audio.frames),
+            Some(frames)
+        );
     }
 
     #[test]

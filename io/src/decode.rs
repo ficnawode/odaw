@@ -16,6 +16,8 @@ pub struct DecodedAudio {
     pub channels: usize,
     pub frames: u64,
     pub peaks: Vec<f32>,
+    /// Interleaved f32 samples at `channels` and `sample_rate`.
+    pub samples: Vec<f32>,
 }
 
 pub fn decode_peaks(path: &Path, buckets: usize) -> Result<DecodedAudio, DecodeError> {
@@ -55,6 +57,7 @@ pub fn decode_peaks(path: &Path, buckets: usize) -> Result<DecodedAudio, DecodeE
     let mut bucket_peak = 0.0f32;
     let mut bucket_frames = 0usize;
     let mut interleaved: Vec<f32> = Vec::new();
+    let mut samples: Vec<f32> = Vec::new();
 
     loop {
         let packet = match format.next_packet() {
@@ -72,6 +75,7 @@ pub fn decode_peaks(path: &Path, buckets: usize) -> Result<DecodedAudio, DecodeE
                 channels = spec.channels().count().max(1);
                 interleaved.resize(audio.samples_interleaved(), 0.0);
                 audio.copy_to_slice_interleaved(&mut interleaved);
+                samples.extend_from_slice(&interleaved);
                 frames += audio.frames() as u64;
                 for frame in interleaved.chunks_exact(channels) {
                     let peak = frame
@@ -99,6 +103,7 @@ pub fn decode_peaks(path: &Path, buckets: usize) -> Result<DecodedAudio, DecodeE
         channels,
         frames,
         peaks: downsample(&raw_peaks, buckets.max(1)),
+        samples,
     })
 }
 
@@ -178,6 +183,8 @@ mod tests {
         assert_eq!(decoded.frames, frames as u64);
         assert_eq!(decoded.peaks.len(), 3);
         assert!(decoded.peaks.iter().any(|peak| *peak > 0.4));
+        assert_eq!(decoded.samples.len(), frames * 2);
+        assert!(decoded.samples.iter().any(|sample| *sample > 0.4));
     }
 
     #[test]

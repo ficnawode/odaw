@@ -4,7 +4,7 @@ use std::sync::Arc;
 use eframe::egui::{
     self, Align, Align2, Color32, FontId, Layout, Pos2, Rect, Sense, Stroke, pos2, vec2,
 };
-use odaw_core::{Clip, ClipContent, ClipId, Node, NodeId, NodeRole, PPQ, Project, Tick};
+use odaw_core::{Clip, ClipContent, ClipId, Frames, Node, NodeId, NodeRole, PPQ, Project, Tick};
 
 use crate::editor::{Editor, TRACK_COLORS};
 use crate::mixer::MixerState;
@@ -27,6 +27,7 @@ struct ClipRow {
     id: ClipId,
     clip: Clip,
     peaks: Option<Arc<[f32]>>,
+    source_frames: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -228,6 +229,7 @@ pub fn show(
                             rect,
                             draw,
                             clip.peaks.as_deref(),
+                            clip.source_frames,
                             track.color,
                             selected,
                             hovered,
@@ -415,6 +417,12 @@ pub fn show(
                                         {
                                             preview.start = Tick::from_raw(start);
                                             preview.length = Tick::from_raw((end - start).max(1));
+                                            trim_audio_start(
+                                                asset_frames(editor, original),
+                                                original,
+                                                preview,
+                                                start,
+                                            );
                                         }
                                     }
                                 }
@@ -422,15 +430,18 @@ pub fn show(
                                     if let Some((_, original)) =
                                         drag.originals.iter().find(|(id, _)| *id == drag.primary)
                                     {
+                                        let length =
+                                            snap_tick(original.length.raw() + delta_ticks, *snap)
+                                                .max(1);
                                         if let Some((_, preview)) =
                                             previews.iter_mut().find(|(id, _)| *id == drag.primary)
                                         {
-                                            preview.length = Tick::from_raw(
-                                                snap_tick(
-                                                    original.length.raw() + delta_ticks,
-                                                    *snap,
-                                                )
-                                                .max(1),
+                                            preview.length = Tick::from_raw(length);
+                                            trim_audio_end(
+                                                asset_frames(editor, original),
+                                                original,
+                                                preview,
+                                                length,
                                             );
                                         }
                                     }
@@ -826,11 +837,13 @@ fn draw_grid(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_clip(
     painter: &egui::Painter,
     rect: Rect,
     clip: &Clip,
     peaks: Option<&[f32]>,
+    source_frames: Option<u64>,
     color: Color32,
     selected: bool,
     hovered: bool,
@@ -843,9 +856,20 @@ fn draw_clip(
 
     match &clip.content {
         ClipContent::Midi { notes, .. } => draw_midi_preview(painter, rect, notes, clip.length),
-        ClipContent::Audio { .. } => {
+        ClipContent::Audio {
+            source_start,
+            source_length,
+            ..
+        } => {
             if let Some(peaks) = peaks {
-                draw_waveform(painter, rect, peaks);
+                draw_waveform(
+                    painter,
+                    rect,
+                    peaks,
+                    source_frames.unwrap_or(1).max(1),
+                    source_start.raw().max(0) as f64,
+                    source_length.raw().max(0) as f64,
+                );
             }
         }
         ClipContent::Empty => {}
@@ -917,21 +941,34 @@ fn draw_midi_preview(
     }
 }
 
-fn draw_waveform(painter: &egui::Painter, rect: Rect, peaks: &[f32]) {
-    if peaks.is_empty() || rect.width() < 4.0 {
+fn draw_waveform(
+    painter: &egui::Painter,
+    rect: Rect,
+    peaks: &[f32],
+    source_frames: u64,
+    source_start: f64,
+    source_length: f64,
+) {
+    if peaks.is_empty() || rect.width() < 4.0 || source_frames == 0 {
+        return;
+    }
+    let start_ratio = (source_start / source_frames as f64).clamp(0.0, 1.0);
+    let length_ratio = (source_length / source_frames as f64).clamp(0.0, 1.0 - start_ratio);
+    if length_ratio <= 0.0 {
         return;
     }
     let center = rect.center().y;
     let amplitude = (rect.height() * 0.5 - 6.0).max(1.0);
-    let color = Color32::from_rgba_unmultiplied(10, 14, 20, 150);
+    let color = Color32::from_rgba_unmultiplied(12, 15, 20, 215);
     let mut x = rect.min.x + 1.0;
     while x < rect.max.x - 1.0 {
         let ratio = (x - rect.min.x) / rect.width();
-        let index = ((ratio * peaks.len() as f32) as usize).min(peaks.len() - 1);
+        let peak_ratio = start_ratio + f64::from(ratio) * length_ratio;
+        let index = ((peak_ratio * peaks.len() as f64) as usize).min(peaks.len() - 1);
         let height = (peaks[index] * amplitude).clamp(0.4, amplitude);
         painter.line_segment(
             [pos2(x, center - height), pos2(x, center + height)],
-            Stroke::new(1.0_f32, color),
+            Stroke::new(1.25_f32, color),
         );
         x += 2.0;
     }
@@ -958,6 +995,12 @@ fn track_rows(project: &Project, editor: &Editor) -> Vec<TrackRow> {
                         clip: clip.clone(),
                         peaks: match &clip.content {
                             ClipContent::Audio { asset, .. } => editor.audio_peaks(*asset),
+                            ClipContent::Midi { .. } | ClipContent::Empty => None,
+                        },
+                        source_frames: match &clip.content {
+                            ClipContent::Audio { asset, .. } => {
+                                editor.audio_asset(*asset).map(|audio| audio.frames as u64)
+                            }
                             ClipContent::Midi { .. } | ClipContent::Empty => None,
                         },
                     })
@@ -1016,6 +1059,66 @@ fn track_at_y(y: f32, origin: Pos2, tracks: &[TrackRow]) -> Option<NodeId> {
     tracks.get(row as usize).map(|track| track.id)
 }
 
+fn asset_frames(editor: &Editor, clip: &Clip) -> Option<i64> {
+    let ClipContent::Audio { asset, .. } = &clip.content else {
+        return None;
+    };
+    editor.audio_asset(*asset).map(|audio| audio.frames as i64)
+}
+
+fn trim_audio_start(available: Option<i64>, original: &Clip, preview: &mut Clip, new_start: i64) {
+    let ClipContent::Audio {
+        source_start,
+        source_length,
+        ..
+    } = &original.content
+    else {
+        return;
+    };
+    let delta = new_start - original.start.raw();
+    let delta_source = (delta as f64 * source_length.raw() as f64
+        / original.length.raw().max(1) as f64)
+        .round() as i64;
+    let source_end = source_start.raw() + source_length.raw();
+    let mut start = source_start.raw() + delta_source;
+    if let Some(frames) = available {
+        start = start.clamp(0, frames.saturating_sub(1));
+    } else {
+        start = start.max(0);
+    }
+    let length = (source_end - start).max(1);
+    if let ClipContent::Audio {
+        source_start,
+        source_length,
+        ..
+    } = &mut preview.content
+    {
+        *source_start = Frames::from_raw(start);
+        *source_length = Frames::from_raw(length);
+    }
+}
+
+fn trim_audio_end(available: Option<i64>, original: &Clip, preview: &mut Clip, new_length: i64) {
+    let ClipContent::Audio {
+        source_start,
+        source_length,
+        ..
+    } = &original.content
+    else {
+        return;
+    };
+    let available = available.map(|frames| (frames - source_start.raw()).max(1));
+    let delta = new_length - original.length.raw();
+    let delta_source = (delta as f64 * source_length.raw() as f64
+        / original.length.raw().max(1) as f64)
+        .round() as i64;
+    let length = (source_length.raw() + delta_source).max(1);
+    let length = available.map_or(length, |available| length.min(available));
+    if let ClipContent::Audio { source_length, .. } = &mut preview.content {
+        *source_length = Frames::from_raw(length);
+    }
+}
+
 fn tick_at(x: f32, origin: Pos2, pixels_per_beat: f32, snap: Snap) -> Tick {
     let raw = ((x - origin.x) / pixels_per_beat * PPQ as f32).round() as i64;
     Tick::from_raw(snap_tick(raw.max(0), snap))
@@ -1025,4 +1128,85 @@ fn clip_rect(clip: &Clip, origin: Pos2, row_y: f32, pixels_per_beat: f32) -> Rec
     let x = origin.x + clip.start.raw().max(0) as f32 / PPQ as f32 * pixels_per_beat;
     let width = clip.length.raw().max(1) as f32 / PPQ as f32 * pixels_per_beat;
     Rect::from_min_size(pos2(x, row_y + 4.0), vec2(width.max(4.0), ROW_HEIGHT - 8.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use odaw_core::AssetId;
+
+    fn audio_clip(start: i64, source_start: i64) -> Clip {
+        Clip {
+            node: NodeId::from_raw(1),
+            start: Tick::from_raw(start),
+            length: Tick::from_raw(4 * PPQ),
+            content: ClipContent::Audio {
+                asset: AssetId::from_bytes([1; 32]),
+                source_start: Frames::from_raw(source_start),
+                source_length: Frames::from_raw(4_800),
+            },
+        }
+    }
+
+    #[test]
+    fn trimming_the_start_moves_the_source_window() {
+        let original = audio_clip(PPQ, 4_800);
+        let mut preview = original.clone();
+        let start = original.start.raw() + PPQ;
+        preview.start = Tick::from_raw(start);
+        preview.length = Tick::from_raw(3 * PPQ);
+        trim_audio_start(Some(20_000), &original, &mut preview, start);
+
+        let ClipContent::Audio {
+            source_start,
+            source_length,
+            ..
+        } = preview.content
+        else {
+            panic!("expected audio");
+        };
+        assert_eq!(source_start.raw(), 6_000);
+        assert_eq!(source_length.raw(), 3_600);
+    }
+
+    #[test]
+    fn extending_the_start_reveals_earlier_source() {
+        let original = audio_clip(PPQ, 4_800);
+        let mut preview = original.clone();
+        preview.start = Tick::ZERO;
+        preview.length = Tick::from_raw(5 * PPQ);
+        trim_audio_start(Some(20_000), &original, &mut preview, 0);
+
+        let ClipContent::Audio {
+            source_start,
+            source_length,
+            ..
+        } = preview.content
+        else {
+            panic!("expected audio");
+        };
+        assert_eq!(source_start.raw(), 3_600);
+        assert_eq!(source_length.raw(), 6_000);
+    }
+
+    #[test]
+    fn trimming_and_extending_the_end_respects_the_asset() {
+        let original = audio_clip(0, 0);
+        let mut preview = original.clone();
+        preview.length = Tick::from_raw(5 * PPQ);
+        trim_audio_end(Some(7_000), &original, &mut preview, 5 * PPQ);
+
+        let ClipContent::Audio { source_length, .. } = preview.content else {
+            panic!("expected audio");
+        };
+        assert_eq!(source_length.raw(), 6_000);
+
+        let mut preview = original.clone();
+        preview.length = Tick::from_raw(8 * PPQ);
+        trim_audio_end(Some(5_000), &original, &mut preview, 8 * PPQ);
+        let ClipContent::Audio { source_length, .. } = preview.content else {
+            panic!("expected audio");
+        };
+        assert_eq!(source_length.raw(), 5_000);
+    }
 }
