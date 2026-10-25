@@ -13,6 +13,7 @@ type UnitId = usize;
 
 struct Unit {
     node: NodeId,
+    event_target: Option<NodeId>,
     processor: Option<Box<dyn DeviceProcessor>>,
     dependencies: Vec<UnitId>,
 }
@@ -113,6 +114,7 @@ impl Compiler {
                 let unit = units.len();
                 units.push(Unit {
                     node: *owner,
+                    event_target: None,
                     processor: Some(Box::new(PassThrough::new())),
                     dependencies: Vec::new(),
                 });
@@ -164,6 +166,7 @@ impl Compiler {
                 let unit_id = units.len();
                 units.push(Unit {
                     node: *device,
+                    event_target: (node.role == NodeRole::Track).then_some(*owner),
                     processor: Some(processor),
                     dependencies: previous_unit.into_iter().collect(),
                 });
@@ -248,6 +251,7 @@ impl Compiler {
                 node: unit.node,
                 inputs,
                 output: position,
+                event_target: unit.event_target,
                 processor,
             });
         }
@@ -509,13 +513,22 @@ mod tests {
             vec![2, 3, 4]
         );
         assert_eq!(compiled.plan.master, Some(2));
-        assert_eq!(compiled.params.len(), 3);
+        assert_eq!(compiled.params.len(), 2);
         assert_eq!(
             compiled.params.get(&ParamAddress {
                 node: NodeId::from_raw(2),
-                param: ParamId::new("frequency"),
+                param: ParamId::new("gain"),
             }),
-            Some(ParamValue::Float(440.0))
+            Some(ParamValue::Float(0.25))
+        );
+        assert_eq!(
+            compiled
+                .plan
+                .steps
+                .iter()
+                .map(|step| step.event_target)
+                .collect::<Vec<_>>(),
+            vec![Some(NodeId::from_raw(1)), Some(NodeId::from_raw(1)), None]
         );
     }
 

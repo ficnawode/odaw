@@ -1,7 +1,7 @@
 use odaw_core::{
-    Asset, AssetId, AutomationLane, Clip, ClipId, Edge, EdgeId, LoopRegion, Marker, MarkerId,
-    ModulationLink, Node, NodeId, ParamAddress, ParamId, ParamValue, PersistentVector, Project,
-    Section, SectionId, SectionRef, TempoMap, TimeSignature,
+    Asset, AssetId, AutomationLane, Clip, ClipContent, ClipId, Edge, EdgeId, LoopRegion, Marker,
+    MarkerId, ModulationLink, Node, NodeId, ParamAddress, ParamId, ParamValue, PersistentVector,
+    Project, Section, SectionId, SectionRef, TempoMap, TimeSignature,
 };
 
 use crate::change::ChangeSet;
@@ -91,6 +91,11 @@ impl Tx {
     }
 
     pub(crate) fn insert_clip(&mut self, clip: ClipId, value: Clip) {
+        if let ClipContent::Midi { notes, .. } = &value.content {
+            for note in notes {
+                self.changes.notes.insert(note.id);
+            }
+        }
         self.project.clips.insert(clip, value);
         self.changes.clips.insert(clip);
         self.changes.structural = true;
@@ -98,7 +103,12 @@ impl Tx {
 
     pub(crate) fn remove_clip(&mut self, clip: ClipId) -> Option<Clip> {
         let removed = self.project.clips.remove(&clip);
-        if removed.is_some() {
+        if let Some(value) = &removed {
+            if let ClipContent::Midi { notes, .. } = &value.content {
+                for note in notes {
+                    self.changes.notes.insert(note.id);
+                }
+            }
             self.changes.clips.insert(clip);
             self.changes.structural = true;
         }

@@ -30,14 +30,36 @@ impl Container {
         let manifest = self.read_manifest()?;
         let project_path = self.root.join(&manifest.project);
         let bytes = read(&project_path)?;
-        let file: ProjectFile = postcard::from_bytes(&bytes)?;
-        if file.format_version != manifest.format_version {
+        let (project_version, rest) = postcard::take_from_bytes::<u16>(&bytes)?;
+        if project_version != manifest.format_version {
             return Err(ContainerError::VersionMismatch {
                 manifest: manifest.format_version,
-                project: file.format_version,
+                project: project_version,
             });
         }
-        Ok(file)
+        let project = match project_version {
+            1 => {
+                let project: crate::v1::ProjectDtoV1 = postcard::from_bytes(rest)?;
+                ProjectFile {
+                    format_version: FORMAT_VERSION,
+                    project: project.into(),
+                }
+            }
+            FORMAT_VERSION => {
+                let project: crate::dto::ProjectDto = postcard::from_bytes(rest)?;
+                ProjectFile {
+                    format_version: FORMAT_VERSION,
+                    project,
+                }
+            }
+            found => {
+                return Err(ContainerError::UnsupportedVersion {
+                    found,
+                    supported: FORMAT_VERSION,
+                });
+            }
+        };
+        Ok(project)
     }
 
     pub fn load(&self) -> Result<Project, ContainerError> {
@@ -150,7 +172,7 @@ impl Container {
         if manifest.format != FORMAT_NAME {
             return Err(ContainerError::UnknownFormat { path });
         }
-        if manifest.format_version != FORMAT_VERSION {
+        if manifest.format_version == 0 || manifest.format_version > FORMAT_VERSION {
             return Err(ContainerError::UnsupportedVersion {
                 found: manifest.format_version,
                 supported: FORMAT_VERSION,
@@ -589,7 +611,7 @@ mod tests {
         container
             .save(&Project::empty("demo", 48_000, 0).unwrap())
             .unwrap();
-        fs::write(container.root().join(PROJECT_FILE), b"not postcard").unwrap();
+        fs::write(container.root().join(PROJECT_FILE), b"").unwrap();
 
         assert!(matches!(container.load(), Err(ContainerError::Codec(_))));
     }

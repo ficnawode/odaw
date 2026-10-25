@@ -3,7 +3,9 @@ use std::collections::BTreeMap;
 use odaw_core::{NodeId, NodeKind};
 use odaw_engine::DeviceProcessor;
 
-use crate::devices::{GAIN_KIND, Gain, PASS_KIND, PassThrough, SINE_KIND, Sine};
+use crate::devices::{
+    GAIN_KIND, Gain, PASS_KIND, POLY_KIND, PassThrough, PolySine, SINE_KIND, Sine,
+};
 
 type Builder = fn(NodeId) -> Box<dyn DeviceProcessor>;
 
@@ -22,6 +24,7 @@ impl NodeRegistry {
     pub fn builtin() -> Self {
         let mut registry = Self::new();
         registry.register(SINE_KIND.into(), |node| Box::new(Sine::new(node)));
+        registry.register(POLY_KIND.into(), |node| Box::new(PolySine::new(node)));
         registry.register(GAIN_KIND.into(), |node| Box::new(Gain::new(node)));
         registry.register(PASS_KIND.into(), |_| Box::new(PassThrough::new()));
         registry
@@ -46,6 +49,11 @@ mod tests {
         assert!(
             registry
                 .build(&NodeKind::new(SINE_KIND), NodeId::from_raw(1))
+                .is_some()
+        );
+        assert!(
+            registry
+                .build(&NodeKind::new(POLY_KIND), NodeId::from_raw(1))
                 .is_some()
         );
         assert!(

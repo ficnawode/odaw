@@ -1,4 +1,4 @@
-use odaw_core::{ClipId, EdgeId, MarkerId, NodeId, Project, SectionId};
+use odaw_core::{ClipContent, ClipId, EdgeId, MarkerId, NodeId, NoteId, Project, SectionId};
 
 use crate::ChangeSet;
 
@@ -30,6 +30,10 @@ impl IdGenerator {
         ClipId::from_raw(self.take())
     }
 
+    pub fn next_note(&mut self) -> NoteId {
+        NoteId::from_raw(self.take())
+    }
+
     pub fn next_section(&mut self) -> SectionId {
         SectionId::from_raw(self.take())
     }
@@ -48,6 +52,13 @@ impl IdGenerator {
         for id in project.clips.keys() {
             self.observe(id.raw());
         }
+        for clip in project.clips.values() {
+            if let ClipContent::Midi { notes, .. } = &clip.content {
+                for note in notes {
+                    self.observe(note.id.raw());
+                }
+            }
+        }
         for id in project.sections.keys() {
             self.observe(id.raw());
         }
@@ -64,6 +75,9 @@ impl IdGenerator {
             self.observe(id.raw());
         }
         for id in &changes.clips {
+            self.observe(id.raw());
+        }
+        for id in &changes.notes {
             self.observe(id.raw());
         }
         for id in &changes.sections {

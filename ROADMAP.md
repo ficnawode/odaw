@@ -89,14 +89,13 @@ Acceptance:
 
 Implemented in this commit: rack flattening, deterministic DAG ordering, cycle
 and channel checks, the parameter buffer, the block executor, primitive
-sine/gain/pass devices, offline WAV rendering, block-size-independence tests, and
-`odaw demo` / `odaw render`.
+sine/poly/gain/pass devices, inline MIDI notes, the note scheduler, offline WAV
+rendering, block-size-independence tests, and `odaw demo` / `odaw render`.
 
 Remaining in M2:
 
 - latency compensation and delay nodes (non-zero latency is rejected for now);
 - devices used outside a rack or in parallel/sidechain device paths;
-- sample-accurate MIDI scheduling;
 - realtime `cpal` playback and atomic plan handoff;
 - incremental recompile and parameter updates on a live engine;
 - golden WAV fixtures in CI.
@@ -128,23 +127,12 @@ workspace preference, never in the project document.
 
 ## M5 — Piano roll
 
-This milestone needs one data decision recorded in `DESIGN.md`: MIDI notes live
-inline in the clip, not only in an immutable MIDI asset. Inline notes are what
-make per-note editing, undo, and copy/paste tractable. Import/export remains a
-separate path through `AssetId`.
+The data decision is made: MIDI notes live inline in the clip, not only in an
+immutable MIDI asset. Inline notes are what make per-note editing, undo, and
+copy/paste tractable. Import/export remains a separate path through `AssetId`.
 
-Recommended shape:
-
-```text
-Note {
-    id: NoteId,
-    pitch: u8,
-    start: Tick,       // clip-local
-    length: Tick,
-    velocity: u8,
-    channel: u8,
-}
-```
+Implemented: `Note` / `NoteId`, note add/remove/replace commands, note
+selection, the sample-accurate `Scheduler`, and the `builtin.poly` instrument.
 
 Work:
 
@@ -152,13 +140,8 @@ Work:
 - Piano-roll canvas: grid, note lanes, velocity lane, snap/quantize, marquee
   selection, copy/paste/duplicate, zoom, playhead follow.
 - One drag gesture is one transaction and one undo step.
-- Scheduler emits sample-accurate note-on/note-off events per block.
-- A simple polyphonic built-in instrument so the piano roll is testable before
-  plugin support.
 - Keyboard shortcuts and note preview.
-
-Acceptance: draw a four-bar part, hear it, save/reopen, undo a drag as one step,
-and render it offline identically to realtime at the same block size.
+- MIDI recording and quantization depth in M7.
 
 ## M6 — Automation
 
@@ -234,11 +217,12 @@ move ahead of CLAP, but the device interface must not fork.
 
 ## Immediate next steps after this commit
 
-1. Commit this tree as the first-sound commit.
+1. Commit this tree as the MIDI-note commit.
 2. Add realtime `cpal` playback and atomic plan handoff, reusing the offline
-   engine.
-3. Add sample-accurate MIDI scheduling and a simple polyphonic instrument so the
-   piano roll has a real sound source.
-4. Add the versioned command-log DTOs and operation log.
-5. Add the UI shell with track selection, then the piano roll and automation.
-6. Add latency compensation and support for parallel/sidechain device paths.
+   engine and scheduler.
+3. Add the UI shell with track selection.
+4. Build the piano-roll editor on top of the existing notes, commands, selection,
+   scheduler, and poly instrument.
+5. Add the versioned command-log DTOs and operation log.
+6. Add automation editing, CLAP, then VST3.
+7. Add latency compensation and support for parallel/sidechain device paths.

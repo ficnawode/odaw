@@ -1,9 +1,11 @@
 use thiserror::Error;
 
-use crate::clip::ClipContent;
+use crate::clip::{ClipContent, Note};
+use crate::collections::PersistentVector;
 use crate::graph::{NodeRole, PortDirection};
-use crate::ids::{AssetId, ClipId, EdgeId, NodeId, PortId, SectionId};
+use crate::ids::{AssetId, ClipId, EdgeId, NodeId, NoteId, PortId, SectionId};
 use crate::project::Project;
+use crate::time::Tick;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EdgeSide {
@@ -57,12 +59,70 @@ pub enum ValidationError {
     MissingAsset { clip: ClipId, asset: AssetId },
     #[error("clip {0} has a negative length")]
     NegativeClipLength(ClipId),
+    #[error("clip {clip} note {note} is invalid: {reason}")]
+    InvalidNote {
+        clip: ClipId,
+        note: NoteId,
+        reason: NoteError,
+    },
+    #[error("clip {clip} repeats note id {note}")]
+    DuplicateNote { clip: ClipId, note: NoteId },
     #[error("arrangement references missing section {section}")]
     MissingArrangementSection { section: SectionId },
     #[error("modulator link on node {node} references missing modulator {modulator}")]
     MissingModulator { node: NodeId, modulator: NodeId },
     #[error("modulator link on node {node} references non-modulator {modulator}")]
     ModulatorRole { node: NodeId, modulator: NodeId },
+}
+
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum NoteError {
+    #[error("pitch {0} is outside 0..=127")]
+    Pitch(u8),
+    #[error("velocity {0} is outside 0..=127")]
+    Velocity(u8),
+    #[error("channel {0} is outside 0..=15")]
+    Channel(u8),
+    #[error("start tick is negative")]
+    Start,
+    #[error("length must be greater than zero")]
+    Length,
+}
+
+fn validate_notes(
+    clip: ClipId,
+    notes: &PersistentVector<Note>,
+    seen: &mut std::collections::BTreeSet<NoteId>,
+) -> Result<(), ValidationError> {
+    for note in notes {
+        if !seen.insert(note.id) {
+            return Err(ValidationError::DuplicateNote {
+                clip,
+                note: note.id,
+            });
+        }
+        let reason = if note.pitch > 127 {
+            Some(NoteError::Pitch(note.pitch))
+        } else if note.velocity > 127 {
+            Some(NoteError::Velocity(note.velocity))
+        } else if note.channel > 15 {
+            Some(NoteError::Channel(note.channel))
+        } else if note.start < Tick::ZERO {
+            Some(NoteError::Start)
+        } else if note.length <= Tick::ZERO {
+            Some(NoteError::Length)
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            return Err(ValidationError::InvalidNote {
+                clip,
+                note: note.id,
+                reason,
+            });
+        }
+    }
+    Ok(())
 }
 
 impl Project {
@@ -131,6 +191,7 @@ impl Project {
             }
         }
 
+        let mut note_ids = std::collections::BTreeSet::new();
         for (clip_id, clip) in &self.clips {
             let Some(node) = self.nodes.get(&clip.node) else {
                 return Err(ValidationError::MissingClipNode {
@@ -147,13 +208,17 @@ impl Project {
             if clip.length < crate::Tick::ZERO {
                 return Err(ValidationError::NegativeClipLength(*clip_id));
             }
-            if let ClipContent::Audio { asset, .. } = &clip.content {
-                if !self.assets.contains_key(asset) {
-                    return Err(ValidationError::MissingAsset {
-                        clip: *clip_id,
-                        asset: *asset,
-                    });
+            match &clip.content {
+                ClipContent::Audio { asset, .. } => {
+                    if !self.assets.contains_key(asset) {
+                        return Err(ValidationError::MissingAsset {
+                            clip: *clip_id,
+                            asset: *asset,
+                        });
+                    }
                 }
+                ClipContent::Midi { notes, .. } => validate_notes(*clip_id, notes, &mut note_ids)?,
+                ClipContent::Empty => {}
             }
             if !node.clips.contains(clip_id) {
                 return Err(ValidationError::UnlistedClip {
@@ -278,6 +343,32 @@ mod tests {
 
     fn edge(from: NodePort, to: NodePort) -> Edge {
         Edge { from, to }
+    }
+
+    fn project_with_midi_notes(notes: Vec<Note>) -> Project {
+        let mut project = track_and_master();
+        let clip_id = ClipId::from_raw(1);
+        let track_id = NodeId::from_raw(1);
+        project.clips.insert(
+            clip_id,
+            Clip {
+                node: track_id,
+                start: Tick::ZERO,
+                length: Tick::from_raw(crate::PPQ),
+                content: ClipContent::Midi {
+                    source_start: Tick::ZERO,
+                    source_length: Tick::from_raw(crate::PPQ),
+                    notes: notes.into_iter().collect(),
+                },
+            },
+        );
+        project
+            .nodes
+            .get_mut(&track_id)
+            .unwrap()
+            .clips
+            .push_back(clip_id);
+        project
     }
 
     #[test]
@@ -424,6 +515,93 @@ mod tests {
             Err(ValidationError::MissingAsset {
                 clip: clip_id,
                 asset: asset_id,
+            })
+        );
+    }
+
+    #[test]
+    fn midi_notes_are_validated() {
+        let note = Note {
+            id: NoteId::from_raw(1),
+            pitch: 60,
+            start: Tick::ZERO,
+            length: Tick::from_raw(crate::PPQ),
+            velocity: 100,
+            channel: 0,
+        };
+        let project = project_with_midi_notes(vec![note]);
+        assert_eq!(project.validate(), Ok(()));
+
+        let invalid_pitch = project_with_midi_notes(vec![Note { pitch: 200, ..note }]);
+        assert_eq!(
+            invalid_pitch.validate(),
+            Err(ValidationError::InvalidNote {
+                clip: ClipId::from_raw(1),
+                note: NoteId::from_raw(1),
+                reason: NoteError::Pitch(200),
+            })
+        );
+
+        let duplicate = project_with_midi_notes(vec![note, note]);
+        assert_eq!(
+            duplicate.validate(),
+            Err(ValidationError::DuplicateNote {
+                clip: ClipId::from_raw(1),
+                note: NoteId::from_raw(1),
+            })
+        );
+
+        let invalid_length = project_with_midi_notes(vec![Note {
+            length: Tick::ZERO,
+            ..note
+        }]);
+        assert_eq!(
+            invalid_length.validate(),
+            Err(ValidationError::InvalidNote {
+                clip: ClipId::from_raw(1),
+                note: NoteId::from_raw(1),
+                reason: NoteError::Length,
+            })
+        );
+    }
+
+    #[test]
+    fn note_ids_are_unique_across_clips() {
+        let note = Note {
+            id: NoteId::from_raw(1),
+            pitch: 60,
+            start: Tick::ZERO,
+            length: Tick::from_raw(crate::PPQ),
+            velocity: 100,
+            channel: 0,
+        };
+        let mut project = project_with_midi_notes(vec![note]);
+        let second_clip = ClipId::from_raw(2);
+        project.clips.insert(
+            second_clip,
+            Clip {
+                node: NodeId::from_raw(1),
+                start: Tick::ZERO,
+                length: Tick::from_raw(crate::PPQ),
+                content: ClipContent::Midi {
+                    source_start: Tick::ZERO,
+                    source_length: Tick::from_raw(crate::PPQ),
+                    notes: [note].into_iter().collect(),
+                },
+            },
+        );
+        project
+            .nodes
+            .get_mut(&NodeId::from_raw(1))
+            .unwrap()
+            .clips
+            .push_back(second_clip);
+
+        assert_eq!(
+            project.validate(),
+            Err(ValidationError::DuplicateNote {
+                clip: second_clip,
+                note: NoteId::from_raw(1),
             })
         );
     }

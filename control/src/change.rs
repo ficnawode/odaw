@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use odaw_core::{AssetId, ClipId, EdgeId, MarkerId, NodeId, ParamAddress, SectionId};
+use odaw_core::{AssetId, ClipId, EdgeId, MarkerId, NodeId, NoteId, ParamAddress, SectionId};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ChangeSet {
@@ -11,6 +11,7 @@ pub struct ChangeSet {
     pub nodes: BTreeSet<NodeId>,
     pub edges: BTreeSet<EdgeId>,
     pub clips: BTreeSet<ClipId>,
+    pub notes: BTreeSet<NoteId>,
     pub sections: BTreeSet<SectionId>,
     pub markers: BTreeSet<MarkerId>,
     pub assets: BTreeSet<AssetId>,
@@ -26,6 +27,7 @@ impl ChangeSet {
         self.nodes.extend(other.nodes);
         self.edges.extend(other.edges);
         self.clips.extend(other.clips);
+        self.notes.extend(other.notes);
         self.sections.extend(other.sections);
         self.markers.extend(other.markers);
         self.assets.extend(other.assets);
@@ -40,6 +42,7 @@ impl ChangeSet {
             && self.nodes.is_empty()
             && self.edges.is_empty()
             && self.clips.is_empty()
+            && self.notes.is_empty()
             && self.sections.is_empty()
             && self.markers.is_empty()
             && self.assets.is_empty()

@@ -13,7 +13,8 @@ pub use change::ChangeSet;
 pub use command::{
     ArrangementCommand, AssetCommand, AutomationCommand, COMMAND_VERSION, ClipCommand, Command,
     CommandKind, DeviceCommand, EdgeCommand, LoopCommand, MarkerCommand, MetaCommand,
-    ModulationCommand, NodeCommand, ParamChange, ParamCommand, SectionCommand, TempoCommand,
+    ModulationCommand, NodeCommand, NoteCommand, ParamChange, ParamCommand, SectionCommand,
+    TempoCommand,
 };
 pub use dispatch::DispatchError;
 pub use event::Event;

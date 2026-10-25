@@ -34,6 +34,7 @@ macro_rules! id_type {
 id_type!(NodeId);
 id_type!(EdgeId);
 id_type!(ClipId);
+id_type!(NoteId);
 id_type!(SectionId);
 id_type!(MarkerId);
 

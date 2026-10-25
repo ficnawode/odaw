@@ -3,7 +3,7 @@ use std::num::NonZeroUsize;
 use thiserror::Error;
 
 use crate::param::ParamBuffer;
-use crate::plan::{Block, BufferId, CompiledProject, RenderPlan};
+use crate::plan::{Block, BufferId, CompiledProject, NoteEvent, RenderPlan};
 
 #[derive(Debug)]
 pub struct Engine {
@@ -104,7 +104,12 @@ impl Engine {
         &mut self.params
     }
 
-    pub fn process_block(&mut self, frames: usize, output: &mut [f32]) -> Result<(), EngineError> {
+    pub fn process_block(
+        &mut self,
+        frames: usize,
+        events: &[NoteEvent],
+        output: &mut [f32],
+    ) -> Result<(), EngineError> {
         if frames > self.block_size {
             return Err(EngineError::BlockTooLarge {
                 requested: frames,
@@ -112,7 +117,21 @@ impl Engine {
             });
         }
         if frames == 0 {
-            return Ok(());
+            if events.is_empty() {
+                return Ok(());
+            }
+            return Err(EngineError::EventOutOfRange {
+                frame: events[0].frame,
+                frames,
+            });
+        }
+        for event in events {
+            if event.frame as usize >= frames {
+                return Err(EngineError::EventOutOfRange {
+                    frame: event.frame,
+                    frames,
+                });
+            }
         }
 
         let Engine {
@@ -148,6 +167,7 @@ impl Engine {
             destination.fill(0.0);
             let mut block = Block {
                 node: step.node,
+                event_target: step.event_target,
                 sample_rate,
                 channels,
                 start_frame: *start_frame,
@@ -155,6 +175,7 @@ impl Engine {
                 input: &scratch[..required],
                 output: destination,
                 params,
+                events,
             };
             step.processor.process(&mut block);
         }
@@ -197,6 +218,8 @@ pub enum EngineError {
     BlockTooLarge { requested: usize, capacity: usize },
     #[error("output has {provided} samples but {required} are required")]
     OutputTooSmall { provided: usize, required: usize },
+    #[error("note event frame {frame} is outside a block of {frames} frames")]
+    EventOutOfRange { frame: u32, frames: usize },
 }
 
 #[cfg(test)]
@@ -262,6 +285,7 @@ mod tests {
             node,
             inputs,
             output,
+            event_target: None,
             processor: Box::new(processor),
         }
     }
@@ -294,7 +318,7 @@ mod tests {
             4,
         );
         let mut output = [0.0; 8];
-        engine.process_block(4, &mut output).unwrap();
+        engine.process_block(4, &[], &mut output).unwrap();
         assert_eq!(output, [0.5; 8]);
         assert_eq!(engine.start_frame(), 4);
     }
@@ -311,7 +335,7 @@ mod tests {
             2,
         );
         let mut output = [0.0; 4];
-        engine.process_block(2, &mut output).unwrap();
+        engine.process_block(2, &[], &mut output).unwrap();
         assert_eq!(output, [1.5, 1.5, 1.5, 1.5]);
     }
 
@@ -324,8 +348,8 @@ mod tests {
         );
         let mut first = [0.0; 4];
         let mut second = [0.0; 4];
-        engine.process_block(2, &mut first).unwrap();
-        engine.process_block(2, &mut second).unwrap();
+        engine.process_block(2, &[], &mut first).unwrap();
+        engine.process_block(2, &[], &mut second).unwrap();
         assert_eq!(first, [0.0, 0.0, 1.0, 1.0]);
         assert_eq!(second, [2.0, 2.0, 3.0, 3.0]);
     }
@@ -380,7 +404,7 @@ mod tests {
             2,
         );
         assert_eq!(
-            engine.process_block(3, &mut [0.0; 6]).err(),
+            engine.process_block(3, &[], &mut [0.0; 6]).err(),
             Some(EngineError::BlockTooLarge {
                 requested: 3,
                 capacity: 2,
@@ -396,7 +420,7 @@ mod tests {
             4,
         );
         assert_eq!(
-            engine.process_block(4, &mut [0.0; 2]).err(),
+            engine.process_block(4, &[], &mut [0.0; 2]).err(),
             Some(EngineError::OutputTooSmall {
                 provided: 2,
                 required: 8,
@@ -418,14 +442,14 @@ mod tests {
         let mut engine = Engine::new(compiled, NonZeroUsize::new(2).unwrap()).unwrap();
 
         let mut first = [0.0; 4];
-        engine.process_block(2, &mut first).unwrap();
+        engine.process_block(2, &[], &mut first).unwrap();
         assert_eq!(first, [0.25; 4]);
 
         engine
             .params_mut()
             .set(&address, odaw_core::ParamValue::Float(0.5));
         let mut second = [0.0; 4];
-        engine.process_block(2, &mut second).unwrap();
+        engine.process_block(2, &[], &mut second).unwrap();
         assert_eq!(second, [0.5; 4]);
     }
 }

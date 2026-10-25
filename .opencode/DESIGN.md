@@ -566,7 +566,9 @@ Notes:
 | Name | Is | Job |
 | --- | --- | --- |
 | `Clip` | data | A region on a timeline belonging to a node. |
-| `ClipContent` | data | What the clip holds: `Audio` (source range in `Frames`), `Midi` (source range in `Tick`), or `Empty`. |
+| `ClipContent` | data | What the clip holds: `Audio` (source range in `Frames`), `Midi` (inline notes plus source range in `Tick`), or `Empty`. |
+| `Note` | data | A MIDI note inside a clip: `NoteId`, pitch, clip-local `Tick` start and length, velocity, channel. |
+| `NoteId` | data | Identity of a note within the project, used by selection and editing commands. |
 | `Section` | data | A reusable named span of clip placements, referenced by the arrangement. |
 | `SectionRef` | data | `(section, repeat, active)`. One instance of a `Section` in the arrangement; `active = false` hides it. |
 | `LoopRegion` | data | A timeline range with looping enabled. |
@@ -584,6 +586,9 @@ Notes:
 
 Notes:
 
+- MIDI notes are stored inline in `ClipContent::Midi` so per-note editing,
+  undo, and copy/paste are ordinary document commands. A MIDI asset remains an
+  import/export path, not the editable source of truth.
 - Automation is "what the value should be". Modulation is "what
   temporarily offsets it". They are separate but share one ownership rule:
   both live on the target node. An `AutomationLane` is explicit keyframes
@@ -824,10 +829,13 @@ Resolved (items already stated in section 3 are not repeated):
    library later stays localized.
 10. `[CONFIRMED]` Selection is control-side state, not document state. It is
     not serialized in the project and is not an undo step. It holds nodes,
-    clips, an optional tick range, and a separate focused node; it is pruned
-    after edits and undo/redo.
+    clips, notes, an optional tick range, and a separate focused node; it is
+    pruned after edits and undo/redo.
 11. `[CONFIRMED]` The default `History` bound is 512 transactions. Asset bytes
     are bounded separately; see section 2.10.
+12. `[CONFIRMED]` MIDI notes are inline in the clip and carry `NoteId`s.
+    Project format v2 encodes them; v1 containers migrate with empty note
+    lists. See section 4.3.
 
 Still open:
 

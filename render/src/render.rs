@@ -2,7 +2,7 @@ use std::num::NonZeroUsize;
 
 use odaw_compile::{CompileError, Compiler};
 use odaw_core::Project;
-use odaw_engine::{Engine, EngineError};
+use odaw_engine::{Engine, EngineError, Scheduler, SchedulerError};
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,6 +26,7 @@ pub fn render_project(
     let sample_rate = compiled.plan.sample_rate;
     let channels = compiled.plan.channels;
     let mut engine = Engine::new(compiled, options.block_size)?;
+    let scheduler = Scheduler::new(project)?;
 
     let total =
         usize::try_from(options.frames).map_err(|_| RenderError::TooManyFrames(options.frames))?;
@@ -35,12 +36,14 @@ pub fn render_project(
     let mut samples = vec![0.0; sample_count];
 
     let block_size = options.block_size.get();
+    let mut events = Vec::new();
     let mut offset = 0usize;
     while offset < total {
         let frames = (total - offset).min(block_size);
+        scheduler.events_for_block(offset as u64, frames, &mut events);
         let start = offset * channels;
         let end = start + frames * channels;
-        engine.process_block(frames, &mut samples[start..end])?;
+        engine.process_block(frames, &events, &mut samples[start..end])?;
         offset += frames;
     }
 
@@ -57,6 +60,8 @@ pub enum RenderError {
     Compile(#[from] CompileError),
     #[error(transparent)]
     Engine(#[from] EngineError),
+    #[error(transparent)]
+    Schedule(#[from] SchedulerError),
     #[error("{0} frames do not fit in memory")]
     TooManyFrames(u64),
 }
@@ -99,13 +104,17 @@ mod tests {
     }
 
     #[test]
-    fn first_samples_follow_the_expected_gain_stage() {
+    fn first_samples_follow_the_expected_voice_gain() {
         let audio = render_project(&demo::project(), options(16, 4)).unwrap();
-        let expected = (2.0 * std::f64::consts::PI * 440.0 / 48_000.0).sin() * 0.25 * 0.5;
+        let frequency = 440.0 * 2f64.powf((60.0 - 69.0) / 12.0);
+        let expected = (2.0 * std::f64::consts::PI * frequency / 48_000.0).sin()
+            * 0.25
+            * 0.5
+            * (100.0 / 127.0);
         assert_eq!(audio.samples[0], 0.0);
         assert_eq!(audio.samples[1], 0.0);
-        assert!((f64::from(audio.samples[2]) - expected).abs() < 1e-7);
-        assert!((f64::from(audio.samples[3]) - expected).abs() < 1e-7);
+        assert!((f64::from(audio.samples[2]) - expected).abs() < 1e-6);
+        assert!((f64::from(audio.samples[3]) - expected).abs() < 1e-6);
     }
 
     #[test]

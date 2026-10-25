@@ -1,6 +1,6 @@
 use std::num::NonZeroUsize;
 
-use odaw_core::{ClipId, EdgeId, MarkerId, NodeId, Project, SectionId, ValidationError};
+use odaw_core::{ClipId, EdgeId, MarkerId, NodeId, NoteId, Project, SectionId, ValidationError};
 use thiserror::Error;
 
 use crate::change::ChangeSet;
@@ -108,6 +108,10 @@ impl<E: Effects> Session<E> {
 
     pub fn next_clip_id(&mut self) -> ClipId {
         self.ids.next_clip()
+    }
+
+    pub fn next_note_id(&mut self) -> NoteId {
+        self.ids.next_note()
     }
 
     pub fn next_section_id(&mut self) -> SectionId {
@@ -613,5 +617,6 @@ mod tests {
         assert_eq!(session.next_section_id(), SectionId::from_raw(3));
         assert_eq!(session.next_edge_id(), EdgeId::from_raw(4));
         assert_eq!(session.next_node_id(), NodeId::from_raw(5));
+        assert_eq!(session.next_note_id(), NoteId::from_raw(6));
     }
 }

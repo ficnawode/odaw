@@ -29,7 +29,7 @@ fn new_inspect_and_validate_round_trip() {
         String::from_utf8_lossy(&inspected.stderr)
     );
     let json: serde_json::Value = serde_json::from_slice(&inspected.stdout).unwrap();
-    assert_eq!(json["format_version"], 1);
+    assert_eq!(json["format_version"], 2);
     assert_eq!(json["project"]["meta"]["name"], "demo");
     assert_eq!(json["project"]["meta"]["seed"], 9);
     assert_eq!(json["project"]["meta"]["sample_rate"], 48_000);

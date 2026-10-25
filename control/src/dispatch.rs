@@ -1,13 +1,14 @@
 use odaw_core::{
-    Clip, ClipId, Edge, EdgeId, NodeId, NodeRole, ParamAddress, ParamId, PersistentVector,
-    PortDirection, PortId, SectionId, SectionRef, TempoMap,
+    Clip, ClipContent, ClipId, Edge, EdgeId, NodeId, NodeRole, NoteId, ParamAddress, ParamId,
+    PersistentVector, PortDirection, PortId, SectionId, SectionRef, TempoMap,
 };
 use thiserror::Error;
 
 use crate::command::{
     ArrangementCommand, AssetCommand, AutomationCommand, COMMAND_VERSION, ClipCommand, Command,
     CommandKind, DeviceCommand, EdgeCommand, LoopCommand, MarkerCommand, MetaCommand,
-    ModulationCommand, NodeCommand, ParamChange, ParamCommand, SectionCommand, TempoCommand,
+    ModulationCommand, NodeCommand, NoteCommand, ParamChange, ParamCommand, SectionCommand,
+    TempoCommand,
 };
 use crate::tx::Tx;
 
@@ -26,6 +27,7 @@ pub(crate) fn dispatch(command: &Command, tx: &mut Tx) -> Result<(), DispatchErr
         CommandKind::Device(command) => dispatch_device(command, tx),
         CommandKind::Edge(command) => dispatch_edge(command, tx),
         CommandKind::Clip(command) => dispatch_clip(command, tx),
+        CommandKind::Note(command) => dispatch_note(command, tx),
         CommandKind::Section(command) => dispatch_section(command, tx),
         CommandKind::Arrangement(command) => dispatch_arrangement(command, tx),
         CommandKind::Loop(command) => dispatch_loop(command, tx),
@@ -170,6 +172,103 @@ fn dispatch_clip(command: &ClipCommand, tx: &mut Tx) -> Result<(), DispatchError
             }
             tx.insert_clip(*clip, value.clone());
             attach_clip_to_node(tx, value.node, *clip);
+        }
+    }
+    Ok(())
+}
+
+fn dispatch_note(command: &NoteCommand, tx: &mut Tx) -> Result<(), DispatchError> {
+    match command {
+        NoteCommand::Add { clip, note } => {
+            let Some(mut value) = tx.clip(*clip).cloned() else {
+                return Err(DispatchError::MissingClip(*clip));
+            };
+            let ClipContent::Midi {
+                source_start,
+                source_length,
+                mut notes,
+            } = value.content
+            else {
+                return Err(DispatchError::NotAMidiClip(*clip));
+            };
+            if notes.iter().any(|existing| existing.id == note.id) {
+                return Err(DispatchError::NoteExists {
+                    clip: *clip,
+                    note: note.id,
+                });
+            }
+            notes.push_back(*note);
+            value.content = ClipContent::Midi {
+                source_start,
+                source_length,
+                notes,
+            };
+            tx.insert_clip(*clip, value);
+        }
+        NoteCommand::Remove { clip, note } => {
+            let Some(mut value) = tx.clip(*clip).cloned() else {
+                return Err(DispatchError::MissingClip(*clip));
+            };
+            let ClipContent::Midi {
+                source_start,
+                source_length,
+                notes,
+            } = value.content
+            else {
+                return Err(DispatchError::NotAMidiClip(*clip));
+            };
+            if !notes.iter().any(|existing| existing.id == *note) {
+                return Err(DispatchError::MissingNote {
+                    clip: *clip,
+                    note: *note,
+                });
+            }
+            let notes = notes
+                .iter()
+                .filter(|existing| existing.id != *note)
+                .copied()
+                .collect();
+            value.content = ClipContent::Midi {
+                source_start,
+                source_length,
+                notes,
+            };
+            tx.insert_clip(*clip, value);
+        }
+        NoteCommand::Replace { clip, note } => {
+            let Some(mut value) = tx.clip(*clip).cloned() else {
+                return Err(DispatchError::MissingClip(*clip));
+            };
+            let ClipContent::Midi {
+                source_start,
+                source_length,
+                notes,
+            } = value.content
+            else {
+                return Err(DispatchError::NotAMidiClip(*clip));
+            };
+            if !notes.iter().any(|existing| existing.id == note.id) {
+                return Err(DispatchError::MissingNote {
+                    clip: *clip,
+                    note: note.id,
+                });
+            }
+            let notes = notes
+                .iter()
+                .map(|existing| {
+                    if existing.id == note.id {
+                        *note
+                    } else {
+                        *existing
+                    }
+                })
+                .collect();
+            value.content = ClipContent::Midi {
+                source_start,
+                source_length,
+                notes,
+            };
+            tx.insert_clip(*clip, value);
         }
     }
     Ok(())
@@ -494,6 +593,12 @@ pub enum DispatchError {
     ClipExists(ClipId),
     #[error("clip {0} does not exist")]
     MissingClip(ClipId),
+    #[error("clip {0} does not contain MIDI notes")]
+    NotAMidiClip(ClipId),
+    #[error("clip {clip} already contains note {note}")]
+    NoteExists { clip: ClipId, note: NoteId },
+    #[error("clip {clip} does not contain note {note}")]
+    MissingNote { clip: ClipId, note: NoteId },
     #[error("section {0} already exists")]
     SectionExists(SectionId),
     #[error("section {0} does not exist")]
@@ -506,8 +611,8 @@ pub enum DispatchError {
 mod tests {
     use odaw_core::{
         AutomationLane, AutomationMode, ChannelLayout, Curve, Keyframe, Marker, MarkerId,
-        ModulationLink, Node, NodeKind, NodePort, ParamId, ParamValue, Port, Project, Section,
-        Tick,
+        ModulationLink, Node, NodeKind, NodePort, Note, ParamId, ParamValue, Port, Project,
+        Section, Tick,
     };
 
     use super::*;
@@ -537,6 +642,30 @@ mod tests {
             start: Tick::ZERO,
             length: Tick::from_raw(odaw_core::PPQ),
             content: odaw_core::ClipContent::Empty,
+        }
+    }
+
+    fn midi_clip(node: NodeId) -> Clip {
+        Clip {
+            node,
+            start: Tick::ZERO,
+            length: Tick::from_raw(odaw_core::PPQ),
+            content: ClipContent::Midi {
+                source_start: Tick::ZERO,
+                source_length: Tick::from_raw(odaw_core::PPQ),
+                notes: [].into_iter().collect(),
+            },
+        }
+    }
+
+    fn note(id: u64, pitch: u8, start: i64) -> Note {
+        Note {
+            id: NoteId::from_raw(id),
+            pitch,
+            start: Tick::from_raw(start),
+            length: Tick::from_raw(odaw_core::PPQ),
+            velocity: 100,
+            channel: 0,
         }
     }
 
@@ -951,6 +1080,105 @@ mod tests {
         );
         assert!(outcome.changes.markers.contains(&MarkerId::from_raw(2)));
         assert!(outcome.changes.is_structural());
+    }
+
+    #[test]
+    fn note_commands_edit_midi_clips() {
+        let mut tx = Tx::new(project());
+        tx.insert_node(NodeId::from_raw(1), track());
+        run(
+            Command::new(CommandKind::Clip(ClipCommand::Add {
+                clip: ClipId::from_raw(2),
+                value: midi_clip(NodeId::from_raw(1)),
+            })),
+            &mut tx,
+        )
+        .unwrap();
+
+        run(
+            Command::new(CommandKind::Note(NoteCommand::Add {
+                clip: ClipId::from_raw(2),
+                note: note(3, 60, 0),
+            })),
+            &mut tx,
+        )
+        .unwrap();
+        run(
+            Command::new(CommandKind::Note(NoteCommand::Replace {
+                clip: ClipId::from_raw(2),
+                note: note(3, 64, 120),
+            })),
+            &mut tx,
+        )
+        .unwrap();
+
+        let outcome = tx.commit();
+        let ClipContent::Midi { notes, .. } = &outcome.project.clips[&ClipId::from_raw(2)].content
+        else {
+            panic!("clip should be MIDI");
+        };
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].pitch, 64);
+        assert_eq!(notes[0].start, Tick::from_raw(120));
+    }
+
+    #[test]
+    fn note_commands_require_a_midi_clip() {
+        let mut tx = Tx::new(project());
+        tx.insert_node(NodeId::from_raw(1), track());
+        tx.insert_clip(ClipId::from_raw(2), clip(NodeId::from_raw(1)));
+        let result = run(
+            Command::new(CommandKind::Note(NoteCommand::Add {
+                clip: ClipId::from_raw(2),
+                note: note(3, 60, 0),
+            })),
+            &mut tx,
+        );
+        assert_eq!(
+            result,
+            Err(DispatchError::NotAMidiClip(ClipId::from_raw(2)))
+        );
+    }
+
+    #[test]
+    fn duplicate_and_missing_notes_are_rejected() {
+        let mut tx = Tx::new(project());
+        tx.insert_node(NodeId::from_raw(1), track());
+        tx.insert_clip(ClipId::from_raw(2), midi_clip(NodeId::from_raw(1)));
+        run(
+            Command::new(CommandKind::Note(NoteCommand::Add {
+                clip: ClipId::from_raw(2),
+                note: note(3, 60, 0),
+            })),
+            &mut tx,
+        )
+        .unwrap();
+        assert_eq!(
+            run(
+                Command::new(CommandKind::Note(NoteCommand::Add {
+                    clip: ClipId::from_raw(2),
+                    note: note(3, 62, 0),
+                })),
+                &mut tx,
+            ),
+            Err(DispatchError::NoteExists {
+                clip: ClipId::from_raw(2),
+                note: NoteId::from_raw(3),
+            })
+        );
+        assert_eq!(
+            run(
+                Command::new(CommandKind::Note(NoteCommand::Remove {
+                    clip: ClipId::from_raw(2),
+                    note: NoteId::from_raw(99),
+                })),
+                &mut tx,
+            ),
+            Err(DispatchError::MissingNote {
+                clip: ClipId::from_raw(2),
+                note: NoteId::from_raw(99),
+            })
+        );
     }
 
     #[test]

@@ -14,37 +14,40 @@ Project -> RenderPlan -> WAV (offline) / audio device (realtime)
 
 ## Status
 
-This is the **Phase 2 first-sound milestone**: the project compiles into a
-render plan and renders deterministic audio offline to a WAV file. Realtime
-playback is next.
+This is the **Phase 2 first-sound milestone plus the inline MIDI note path**:
+the project compiles into a render plan, schedules sample-accurate notes, and
+renders deterministic audio offline to a WAV file. Realtime playback is next.
 
 What works today:
 
 - `odaw-core`: typed ids, integer `Tick`/`Frames` time with exact tempo-map
-  conversion, graph/port/parameter/automation types, persistent `Project`, and
-  structural validation.
+  conversion, graph/port/parameter/automation types, inline MIDI notes, the
+  persistent `Project`, and structural validation.
 - `odaw-control`: versioned commands, the `Tx` staging area, the single
   dispatcher, `ChangeSet` tracking, bounded `History` with undo/redo, operators
   and their registry, and a `Session` that owns the document, history, selection,
-  and effects hook.
-- `odaw-engine`: the immutable `RenderPlan`, a typed parameter buffer, and a
-  block executor that sums inputs in declared order.
-- `odaw-dsp`: primitive in-tree devices (`builtin.sine`, `builtin.gain`,
-  `builtin.pass`) and the built-in demo project.
+  and effects hook. Notes have add/remove/replace commands and participate in
+  selection pruning.
+- `odaw-engine`: the immutable `RenderPlan`, a typed parameter buffer, a block
+  executor that sums inputs in declared order, note events, and a sample-accurate
+  scheduler.
+- `odaw-dsp`: primitive in-tree devices (`builtin.sine`, `builtin.poly`,
+  `builtin.gain`, `builtin.pass`) and a demo song with a MIDI melody.
 - `odaw-compile`: rack flattening, DAG topological sort, cycle detection,
   port/channel checks, and plan construction.
 - `odaw-render`: deterministic offline rendering with fixed block size.
 - `odaw-io`: a 16-bit PCM WAV writer.
 - `odaw-format`: versioned DTOs separate from the live types, a postcard project
-  payload, a JSON manifest, and crash-conscious container save/load with
-  interrupted-save recovery.
+  payload, a JSON manifest, and format v1 → v2 migration. MIDI notes are part
+  of the versioned project format.
 - `odaw`: a CLI that creates, inspects, renames, demos, validates, and renders
   projects.
 - CI: formatting, clippy with warnings denied, and the workspace test suite.
 
 Current limits: mono/stereo only, in-tree devices must live in a rack, devices
-with latency are rejected until compensation lands, and realtime/MIDI scheduling
-is not wired yet.
+with latency are rejected until compensation lands, MIDI notes are not recorded
+from hardware yet, audio clips are not rendered yet, and realtime playback is not
+wired.
 
 See [ROADMAP.md](ROADMAP.md) for the product path and
 [.opencode/DESIGN.md](.opencode/DESIGN.md) for the architecture.

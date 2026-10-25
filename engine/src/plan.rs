@@ -19,6 +19,7 @@ pub struct PlanStep {
     pub node: NodeId,
     pub inputs: Vec<BufferId>,
     pub output: BufferId,
+    pub event_target: Option<NodeId>,
     pub processor: Box<dyn DeviceProcessor>,
 }
 
@@ -36,8 +37,24 @@ pub trait DeviceProcessor: fmt::Debug + Send {
     fn process(&mut self, block: &mut Block<'_>);
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoteEventKind {
+    On,
+    Off,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NoteEvent {
+    pub target: NodeId,
+    pub frame: u32,
+    pub kind: NoteEventKind,
+    pub pitch: u8,
+    pub velocity: u8,
+}
+
 pub struct Block<'a> {
     pub node: NodeId,
+    pub event_target: Option<NodeId>,
     pub sample_rate: u32,
     pub channels: usize,
     pub start_frame: u64,
@@ -45,4 +62,5 @@ pub struct Block<'a> {
     pub input: &'a [f32],
     pub output: &'a mut [f32],
     pub params: &'a ParamBuffer,
+    pub events: &'a [NoteEvent],
 }

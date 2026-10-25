@@ -3,9 +3,9 @@ use std::collections::BTreeMap;
 use odaw_core::{
     Asset, AssetId, AssetKind, AutomationLane, AutomationMode, ChannelLayout, Clip, ClipContent,
     ClipId, Curve, Edge, EdgeId, Frames, Keyframe, LoopRegion, Marker, MarkerId, Meta,
-    ModulationLink, Node, NodeId, NodeKind, NodePort, NodeRole, ParamId, ParamValue, Port,
-    PortDirection, PortId, Project, Section, SectionId, SectionRef, TempoMap, TempoPoint, Tick,
-    TimeSignature,
+    ModulationLink, Node, NodeId, NodeKind, NodePort, NodeRole, Note, NoteId, ParamId, ParamValue,
+    Port, PortDirection, PortId, Project, Section, SectionId, SectionRef, TempoMap, TempoPoint,
+    Tick, TimeSignature,
 };
 use odaw_core::{PersistentMap, PersistentVector};
 use serde::{Deserialize, Serialize};
@@ -190,8 +190,19 @@ pub enum ClipContentDto {
     Midi {
         source_start: i64,
         source_length: i64,
+        notes: Vec<NoteDto>,
     },
     Empty,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoteDto {
+    pub id: u64,
+    pub pitch: u8,
+    pub start: i64,
+    pub length: i64,
+    pub velocity: u8,
+    pub channel: u8,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -807,9 +818,11 @@ impl From<&ClipContent> for ClipContentDto {
             ClipContent::Midi {
                 source_start,
                 source_length,
+                notes,
             } => Self::Midi {
                 source_start: source_start.raw(),
                 source_length: source_length.raw(),
+                notes: notes.iter().copied().map(NoteDto::from).collect(),
             },
             ClipContent::Empty => Self::Empty,
         }
@@ -836,12 +849,40 @@ impl TryFrom<ClipContentDto> for ClipContent {
             ClipContentDto::Midi {
                 source_start,
                 source_length,
+                notes,
             } => Self::Midi {
                 source_start: Tick::from_raw(source_start),
                 source_length: Tick::from_raw(source_length),
+                notes: notes.into_iter().map(Note::from).collect(),
             },
             ClipContentDto::Empty => Self::Empty,
         })
+    }
+}
+
+impl From<Note> for NoteDto {
+    fn from(note: Note) -> Self {
+        Self {
+            id: note.id.raw(),
+            pitch: note.pitch,
+            start: note.start.raw(),
+            length: note.length.raw(),
+            velocity: note.velocity,
+            channel: note.channel,
+        }
+    }
+}
+
+impl From<NoteDto> for Note {
+    fn from(dto: NoteDto) -> Self {
+        Self {
+            id: NoteId::from_raw(dto.id),
+            pitch: dto.pitch,
+            start: Tick::from_raw(dto.start),
+            length: Tick::from_raw(dto.length),
+            velocity: dto.velocity,
+            channel: dto.channel,
+        }
     }
 }
 
@@ -921,5 +962,25 @@ mod tests {
             ClipContent::try_from(content),
             Err(FormatError::InvalidAssetId { .. })
         ));
+    }
+
+    #[test]
+    fn midi_notes_round_trip() {
+        let content = ClipContent::Midi {
+            source_start: Tick::ZERO,
+            source_length: Tick::from_raw(1_000),
+            notes: [Note {
+                id: NoteId::from_raw(3),
+                pitch: 60,
+                start: Tick::from_raw(120),
+                length: Tick::from_raw(240),
+                velocity: 100,
+                channel: 0,
+            }]
+            .into_iter()
+            .collect(),
+        };
+        let dto = ClipContentDto::from(&content);
+        assert_eq!(ClipContent::try_from(dto).unwrap(), content);
     }
 }

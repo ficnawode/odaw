@@ -1,5 +1,5 @@
 use crate::collections::PersistentVector;
-use crate::ids::{AssetId, ClipId, NodeId, SectionId};
+use crate::ids::{AssetId, ClipId, NodeId, NoteId, SectionId};
 use crate::time::{Frames, Tick};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -15,6 +15,16 @@ pub struct Asset {
     pub kind: AssetKind,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Note {
+    pub id: NoteId,
+    pub pitch: u8,
+    pub start: Tick,
+    pub length: Tick,
+    pub velocity: u8,
+    pub channel: u8,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClipContent {
     Audio {
@@ -25,6 +35,7 @@ pub enum ClipContent {
     Midi {
         source_start: Tick,
         source_length: Tick,
+        notes: PersistentVector<Note>,
     },
     Empty,
 }

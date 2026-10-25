@@ -1,11 +1,12 @@
 use std::collections::BTreeSet;
 
-use odaw_core::{ClipId, NodeId, Project, TickRange};
+use odaw_core::{ClipContent, ClipId, NodeId, NoteId, Project, TickRange};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Selection {
     pub nodes: BTreeSet<NodeId>,
     pub clips: BTreeSet<ClipId>,
+    pub notes: BTreeSet<NoteId>,
     pub range: Option<TickRange>,
     pub focused_node: Option<NodeId>,
 }
@@ -27,9 +28,20 @@ impl Selection {
         self.clips.insert(clip);
     }
 
+    pub fn select_note(&mut self, note: NoteId) {
+        self.notes.insert(note);
+    }
+
+    pub fn toggle_note(&mut self, note: NoteId) {
+        if !self.notes.remove(&note) {
+            self.notes.insert(note);
+        }
+    }
+
     pub fn clear(&mut self) {
         self.nodes.clear();
         self.clips.clear();
+        self.notes.clear();
         self.range = None;
         self.focused_node = None;
     }
@@ -38,6 +50,16 @@ impl Selection {
         let previous = self.clone();
         self.nodes.retain(|node| project.nodes.contains_key(node));
         self.clips.retain(|clip| project.clips.contains_key(clip));
+        let existing_notes: BTreeSet<NoteId> = project
+            .clips
+            .values()
+            .filter_map(|clip| match &clip.content {
+                ClipContent::Midi { notes, .. } => Some(notes),
+                ClipContent::Audio { .. } | ClipContent::Empty => None,
+            })
+            .flat_map(|notes| notes.iter().map(|note| note.id))
+            .collect();
+        self.notes.retain(|note| existing_notes.contains(note));
         if self
             .focused_node
             .is_some_and(|node| !project.nodes.contains_key(&node))
@@ -50,7 +72,7 @@ impl Selection {
 
 #[cfg(test)]
 mod tests {
-    use odaw_core::{Clip, ClipContent, Node, NodeRole, Tick};
+    use odaw_core::{Clip, ClipContent, Node, NodeRole, Note, NoteId, Tick};
 
     use super::*;
 
@@ -66,6 +88,38 @@ mod tests {
                 start: Tick::ZERO,
                 length: Tick::ZERO,
                 content: ClipContent::Empty,
+            },
+        );
+        project.clips.insert(
+            ClipId::from_raw(3),
+            Clip {
+                node: NodeId::from_raw(1),
+                start: Tick::ZERO,
+                length: Tick::from_raw(10),
+                content: ClipContent::Midi {
+                    source_start: Tick::ZERO,
+                    source_length: Tick::from_raw(10),
+                    notes: [
+                        Note {
+                            id: NoteId::from_raw(10),
+                            pitch: 60,
+                            start: Tick::ZERO,
+                            length: Tick::from_raw(10),
+                            velocity: 100,
+                            channel: 0,
+                        },
+                        Note {
+                            id: NoteId::from_raw(11),
+                            pitch: 64,
+                            start: Tick::ZERO,
+                            length: Tick::from_raw(10),
+                            velocity: 100,
+                            channel: 0,
+                        },
+                    ]
+                    .into_iter()
+                    .collect(),
+                },
             },
         );
         project
@@ -118,5 +172,28 @@ mod tests {
         let mut selection = Selection::default();
         selection.select_node(NodeId::from_raw(1));
         assert!(!selection.retain_existing(&project()));
+    }
+
+    #[test]
+    fn retain_existing_drops_stale_notes() {
+        let mut selection = Selection::default();
+        selection.select_note(NoteId::from_raw(10));
+        selection.select_note(NoteId::from_raw(99));
+        assert!(selection.retain_existing(&project()));
+        assert_eq!(
+            selection.notes.iter().copied().collect::<Vec<_>>(),
+            vec![NoteId::from_raw(10)]
+        );
+    }
+
+    #[test]
+    fn toggling_and_clearing_notes_works() {
+        let mut selection = Selection::default();
+        selection.select_note(NoteId::from_raw(10));
+        selection.toggle_note(NoteId::from_raw(10));
+        assert!(selection.notes.is_empty());
+        selection.select_note(NoteId::from_raw(11));
+        selection.clear();
+        assert!(selection.notes.is_empty());
     }
 }

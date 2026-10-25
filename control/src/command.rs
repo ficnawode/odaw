@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use odaw_core::{
     Asset, AssetId, AutomationLane, Clip, ClipId, Edge, EdgeId, LoopRegion, Marker, MarkerId,
-    ModulationLink, Node, NodeId, NodeKind, ParamAddress, ParamId, ParamValue, Port, Section,
-    SectionId, SectionRef, TempoPoint, TimeSignature,
+    ModulationLink, Node, NodeId, NodeKind, Note, NoteId, ParamAddress, ParamId, ParamValue, Port,
+    Section, SectionId, SectionRef, TempoPoint, TimeSignature,
 };
 
 use crate::operator::OperatorRef;
@@ -44,6 +44,7 @@ pub enum CommandKind {
     Device(DeviceCommand),
     Edge(EdgeCommand),
     Clip(ClipCommand),
+    Note(NoteCommand),
     Section(SectionCommand),
     Arrangement(ArrangementCommand),
     Loop(LoopCommand),
@@ -63,6 +64,7 @@ impl CommandKind {
             Self::Device(_) => "Edit device",
             Self::Edge(_) => "Edit connection",
             Self::Clip(_) => "Edit clip",
+            Self::Note(_) => "Edit note",
             Self::Section(_) => "Edit section",
             Self::Arrangement(_) => "Edit arrangement",
             Self::Loop(_) => "Edit loop",
@@ -121,6 +123,13 @@ pub enum ClipCommand {
     Add { clip: ClipId, value: Clip },
     Remove { clip: ClipId },
     Replace { clip: ClipId, value: Clip },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NoteCommand {
+    Add { clip: ClipId, note: Note },
+    Remove { clip: ClipId, note: NoteId },
+    Replace { clip: ClipId, note: Note },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
