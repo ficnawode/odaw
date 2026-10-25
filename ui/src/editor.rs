@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -6,12 +6,12 @@ use std::sync::Arc;
 use odaw_compile::Compiler;
 use odaw_control::{
     AssetCommand, ClipCommand, Command, CommandKind, EdgeCommand, Event, NodeCommand, NoteCommand,
-    Session, SessionError,
+    ParamChange, ParamCommand, Session, SessionError, TempoCommand,
 };
 use odaw_core::{
     Asset, AssetId, AssetKind, ChannelLayout, Clip, ClipContent, ClipId, Edge, Frames, Node,
-    NodeId, NodeKind, NodePort, NodeRole, Note, NoteId, PPQ, ParamId, ParamValue, Port,
-    PortDirection, PortId, Project, Tick,
+    NodeId, NodeKind, NodePort, NodeRole, Note, NoteId, PPQ, ParamAddress, ParamId, ParamValue,
+    Port, PortDirection, PortId, Project, TempoPoint, Tick,
 };
 use odaw_dsp::demo;
 use odaw_engine::{RealtimeEngine, RealtimeHandle, RealtimeState, realtime};
@@ -30,6 +30,7 @@ pub struct Editor {
     pub path: Option<PathBuf>,
     pub selected_clip: Option<ClipId>,
     pub playing: bool,
+    pub cursor: Tick,
     pub status: Option<String>,
     pub error: Option<String>,
     audio: Option<AudioSession>,
@@ -89,6 +90,7 @@ impl Editor {
             path,
             selected_clip: None,
             playing: false,
+            cursor: Tick::ZERO,
             status: None,
             error,
             audio: None,
@@ -266,7 +268,7 @@ impl Editor {
 
     fn create_audio(&self) -> Result<AudioSession, String> {
         let project = self.session.project();
-        let (state, end_frame) = prepare_state(project)?;
+        let (state, end_frame) = prepare_state_at(project, frames_at(project, self.cursor))?;
         let sample_rate = state.engine.sample_rate();
         let channels = u16::try_from(state.engine.channels())
             .map_err(|_| "unsupported channel count".to_owned())?;
@@ -283,18 +285,31 @@ impl Editor {
 
     pub fn tick(&mut self) -> bool {
         let mut failed = false;
+        let mut finished = false;
         if let Some(audio) = &mut self.audio {
             audio.handle.collect_retired();
             if !audio.backend.is_healthy() {
                 failed = true;
             } else if self.playing && audio.handle.finished() {
-                self.playing = false;
+                finished = true;
+            }
+        }
+        if finished {
+            self.playing = false;
+            if let Some(audio) = &self.audio {
+                let frames =
+                    Frames::from_raw(i64::try_from(audio.handle.position()).unwrap_or(i64::MAX));
+                if let Ok(tick) = self.session.project().tempo.frames_to_tick(frames) {
+                    self.cursor = tick;
+                }
             }
         }
         if failed {
             self.audio = None;
             self.audio_error = Some("the audio output stream failed".to_owned());
             self.playing = false;
+        } else if self.playing {
+            self.cursor = self.playhead_tick();
         }
         self.playing
     }
@@ -311,25 +326,45 @@ impl Editor {
         if self.audio.is_none() {
             self.start_audio();
         }
-        let Some(audio) = &mut self.audio else {
+        if self.audio.is_none() {
             return;
-        };
+        }
 
-        if audio.handle.finished() || audio.handle.position() >= audio.end_frame {
-            let project = self.session.project().clone();
-            match prepare_state(&project) {
-                Ok((state, end_frame)) => {
-                    if let Err(error) = audio.handle.publish(state) {
-                        self.audio_error = Some(error.to_string());
-                        return;
-                    }
-                    audio.end_frame = end_frame;
-                }
+        let project = self.session.project().clone();
+        if self
+            .audio
+            .as_ref()
+            .is_some_and(|audio| audio.handle.finished())
+            && frames_at(&project, self.cursor)
+                >= self.audio.as_ref().map_or(0, |audio| audio.end_frame)
+        {
+            self.cursor = Tick::ZERO;
+        }
+        let cursor_frame = frames_at(&project, self.cursor);
+        let needs_state = self.audio.as_ref().is_some_and(|audio| {
+            audio.handle.finished() || audio.handle.position() != cursor_frame
+        });
+        let prepared = if needs_state {
+            match prepare_state_at(&project, cursor_frame) {
+                Ok(state) => Some(state),
                 Err(error) => {
                     self.audio_error = Some(error);
                     return;
                 }
             }
+        } else {
+            None
+        };
+
+        let Some(audio) = &mut self.audio else {
+            return;
+        };
+        if let Some((state, end_frame)) = prepared {
+            if let Err(error) = audio.handle.publish_at(state, cursor_frame) {
+                self.audio_error = Some(error.to_string());
+                return;
+            }
+            audio.end_frame = end_frame;
         }
 
         match audio.handle.play() {
@@ -342,10 +377,81 @@ impl Editor {
     }
 
     pub fn stop(&mut self) {
+        if self.playing {
+            self.cursor = self.playhead_tick();
+        }
         if let Some(audio) = &mut self.audio {
             let _ = audio.handle.stop();
         }
         self.playing = false;
+    }
+
+    pub fn cursor_tick(&self) -> Tick {
+        self.cursor
+    }
+
+    /// Move the cursor without rebuilding the engine. Used while scrubbing.
+    pub fn preview_cursor(&mut self, tick: Tick) {
+        let tick = tick.max(Tick::ZERO);
+        self.cursor = tick;
+        if let Some(audio) = &mut self.audio {
+            let frame = frames_at(self.session.project(), tick);
+            let _ = audio.handle.seek(frame);
+            audio.handle.collect_retired();
+        }
+    }
+
+    /// Move the cursor and reset the engine so voices do not survive a seek.
+    pub fn set_cursor(&mut self, tick: Tick) {
+        self.preview_cursor(tick);
+        if self.audio.is_some() {
+            self.seek_audio();
+        }
+    }
+
+    pub fn playhead_tick(&self) -> Tick {
+        if !self.playing {
+            return self.cursor;
+        }
+        let frames = Frames::from_raw(i64::try_from(self.position_frames()).unwrap_or(i64::MAX));
+        self.session
+            .project()
+            .tempo
+            .frames_to_tick(frames)
+            .unwrap_or(self.cursor)
+    }
+
+    fn seek_audio(&mut self) {
+        let was_playing = self.playing;
+        let project = self.session.project().clone();
+        let start = frames_at(&project, self.cursor);
+        let Some(audio) = &mut self.audio else {
+            return;
+        };
+        match prepare_state_at(&project, start) {
+            Ok((state, end_frame)) => {
+                if let Err(error) = audio.handle.publish_at(state, start) {
+                    self.audio_error = Some(error.to_string());
+                    self.playing = false;
+                    return;
+                }
+                audio.end_frame = end_frame;
+                self.audio_error = None;
+                if was_playing {
+                    match audio.handle.play() {
+                        Ok(()) => self.playing = true,
+                        Err(error) => {
+                            self.audio_error = Some(error.to_string());
+                            self.playing = false;
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                self.audio_error = Some(error);
+                self.playing = false;
+            }
+        }
     }
 
     pub fn position_frames(&self) -> u64 {
@@ -355,10 +461,12 @@ impl Editor {
     }
 
     pub fn position_seconds(&self) -> f64 {
-        let Some(audio) = &self.audio else {
-            return 0.0;
+        let frames = if self.playing {
+            self.position_frames()
+        } else {
+            frames_at(self.session.project(), self.cursor)
         };
-        self.position_frames() as f64 / f64::from(audio.sample_rate)
+        frames as f64 / f64::from(self.session.project().meta.sample_rate)
     }
 
     pub fn duration_seconds(&self) -> f64 {
@@ -368,14 +476,91 @@ impl Editor {
         audio.end_frame as f64 / f64::from(audio.sample_rate)
     }
 
-    pub fn progress(&self) -> f32 {
-        let Some(audio) = &self.audio else {
-            return 0.0;
-        };
-        if audio.end_frame == 0 {
-            return 0.0;
+    pub fn tempo_bpm(&self) -> f64 {
+        self.session
+            .project()
+            .tempo
+            .points()
+            .next()
+            .map_or(120.0, |point| {
+                60_000_000.0 / f64::from(point.micros_per_quarter)
+            })
+    }
+
+    pub fn set_tempo_bpm(&mut self, bpm: f64) {
+        let anchor = self.playhead_tick();
+        let micros = (60_000_000.0 / bpm.clamp(20.0, 999.0)).round().max(1.0) as u32;
+        let mut points: Vec<TempoPoint> = self.session.project().tempo.points().collect();
+        if let Some(first) = points.first_mut() {
+            first.micros_per_quarter = micros;
+        } else {
+            points.push(TempoPoint {
+                tick: Tick::ZERO,
+                micros_per_quarter: micros,
+            });
         }
-        (self.position_frames() as f64 / audio.end_frame as f64).clamp(0.0, 1.0) as f32
+        self.cursor = anchor;
+        let result = self.session.apply_command(Command::new(CommandKind::Tempo(
+            TempoCommand::SetTempoMap { points },
+        )));
+        if self.after_edit(result) {
+            self.status = Some(format!("tempo {:.1} BPM", bpm.clamp(20.0, 999.0)));
+        }
+    }
+
+    pub fn master_node(&self) -> Option<NodeId> {
+        self.session
+            .project()
+            .nodes
+            .iter()
+            .find(|(_, node)| node.role == NodeRole::Master)
+            .map(|(id, _)| *id)
+    }
+
+    pub fn param_value(&self, node: NodeId, param: &str) -> Option<f64> {
+        let value = self
+            .session
+            .project()
+            .nodes
+            .get(&node)?
+            .params
+            .get(&ParamId::new(param))?;
+        match value {
+            ParamValue::Float(value) => Some(*value),
+            ParamValue::Int(value) => Some(*value as f64),
+            ParamValue::Bool(value) => Some(f64::from(u8::from(*value))),
+            ParamValue::Enum(value) => Some(f64::from(*value)),
+        }
+    }
+
+    pub fn preview_param(&mut self, node: NodeId, param: &str, value: f64) {
+        let address = ParamAddress {
+            node,
+            param: ParamId::new(param),
+        };
+        if let Some(audio) = &mut self.audio {
+            let _ = audio.handle.set_param(address, ParamValue::Float(value));
+        }
+    }
+
+    /// Commit a fader value to the document and its history without rebuilding
+    /// the audio graph. `ParamChange::Value` never touches layout.
+    pub fn commit_param(&mut self, node: NodeId, param: &str, value: f64) {
+        self.preview_param(node, param, value);
+        let result =
+            self.session
+                .apply_command(Command::new(CommandKind::Param(ParamCommand::Set {
+                    address: ParamAddress {
+                        node,
+                        param: ParamId::new(param),
+                    },
+                    value: ParamValue::Float(value),
+                    change: ParamChange::Value,
+                })));
+        match result {
+            Ok(_) => self.error = None,
+            Err(error) => self.error = Some(error.to_string()),
+        }
     }
 
     pub fn save(&mut self) {
@@ -464,7 +649,80 @@ impl Editor {
 
     pub fn select_clip(&mut self, track: NodeId, clip: ClipId) {
         self.select_track(track);
+        let mut selection = self.session.selection().clone();
+        selection.clips.clear();
+        selection.clips.insert(clip);
+        self.session.set_selection(selection);
         self.selected_clip = Some(clip);
+    }
+
+    pub fn toggle_clip(&mut self, track: NodeId, clip: ClipId) {
+        let mut selection = self.session.selection().clone();
+        selection.select_node(track);
+        if !selection.clips.remove(&clip) {
+            selection.clips.insert(clip);
+        }
+        self.session.set_selection(selection);
+        let project = self.session.project();
+        self.selected_clip = self
+            .session
+            .selection()
+            .clips
+            .iter()
+            .copied()
+            .find(|id| project.clips.get(id).is_some_and(is_midi));
+    }
+
+    pub fn is_clip_selected(&self, clip: ClipId) -> bool {
+        self.session.selection().clips.contains(&clip)
+    }
+
+    pub fn selected_clips(&self) -> BTreeSet<ClipId> {
+        let project = self.session.project();
+        self.session
+            .selection()
+            .clips
+            .iter()
+            .copied()
+            .filter(|clip| project.clips.contains_key(clip))
+            .collect()
+    }
+
+    pub fn select_clips(&mut self, clips: BTreeSet<ClipId>) {
+        let project = self.session.project().clone();
+        let mut selection = self.session.selection().clone();
+        selection.clips = clips;
+        let mut focused = None;
+        for clip in &selection.clips {
+            if let Some(clip) = project.clips.get(clip) {
+                selection.nodes.insert(clip.node);
+                focused.get_or_insert(clip.node);
+            }
+        }
+        if let Some(track) = focused {
+            selection.focused_node = Some(track);
+        }
+        self.session.set_selection(selection);
+        let project = self.session.project();
+        self.selected_clip = self
+            .session
+            .selection()
+            .clips
+            .iter()
+            .copied()
+            .find(|id| project.clips.get(id).is_some_and(is_midi))
+            .or_else(|| focused.and_then(|track| self.first_midi_clip(track)));
+    }
+
+    pub fn select_all_clips(&mut self) {
+        let clips = self.session.project().clips.keys().copied().collect();
+        self.select_clips(clips);
+    }
+
+    pub fn clear_clip_selection(&mut self) {
+        let mut selection = self.session.selection().clone();
+        selection.clips.clear();
+        self.session.set_selection(selection);
     }
 
     pub fn selected_clip(&self) -> Option<ClipId> {
@@ -614,8 +872,16 @@ impl Editor {
     }
 
     pub fn select_all_notes(&mut self, clip: ClipId) {
+        let notes: BTreeSet<NoteId> = self.notes(clip).iter().map(|note| note.id).collect();
+        self.select_notes(notes, false);
+    }
+
+    pub fn select_notes(&mut self, notes: BTreeSet<NoteId>, additive: bool) {
         let mut selection = self.session.selection().clone();
-        selection.notes = self.notes(clip).iter().map(|note| note.id).collect();
+        if !additive {
+            selection.notes.clear();
+        }
+        selection.notes.extend(notes);
         if let Some(track) = self.selected_track() {
             selection.nodes.clear();
             selection.nodes.insert(track);
@@ -750,15 +1016,17 @@ impl Editor {
         }
     }
 
-    pub fn split_clip(&mut self, clip_id: ClipId, tick: Tick) {
-        let Some(clip) = self.session.project().clips.get(&clip_id).cloned() else {
-            return;
-        };
+    fn split_clip_commands(
+        &mut self,
+        clip_id: ClipId,
+        tick: Tick,
+    ) -> Option<(ClipId, Vec<Command>)> {
+        let clip = self.session.project().clips.get(&clip_id).cloned()?;
         let start = clip.start.raw();
         let end = start + clip.length.raw();
         let split = tick.raw();
         if split <= start || split >= end {
-            return;
+            return None;
         }
         let split_local = split - start;
         let mut left = clip.clone();
@@ -828,19 +1096,102 @@ impl Editor {
             ClipContent::Empty => {}
         }
         let new_id = self.session.next_clip_id();
-        let commands = vec![
-            Command::new(CommandKind::Clip(ClipCommand::Replace {
-                clip: clip_id,
-                value: left,
-            })),
-            Command::new(CommandKind::Clip(ClipCommand::Add {
-                clip: new_id,
-                value: right,
-            })),
-        ];
+        Some((
+            new_id,
+            vec![
+                Command::new(CommandKind::Clip(ClipCommand::Replace {
+                    clip: clip_id,
+                    value: left,
+                })),
+                Command::new(CommandKind::Clip(ClipCommand::Add {
+                    clip: new_id,
+                    value: right,
+                })),
+            ],
+        ))
+    }
+
+    pub fn split_clip(&mut self, clip_id: ClipId, tick: Tick) {
+        let Some((new_id, commands)) = self.split_clip_commands(clip_id, tick) else {
+            return;
+        };
         let result = self.session.apply_commands(commands, "Split clip");
         if self.after_edit(result) {
             self.selected_clip = Some(new_id);
+        }
+    }
+
+    pub fn split_selected_at_cursor(&mut self) {
+        let tick = self.cursor;
+        let selected = self.session.selection().clips.clone();
+        let targets: Vec<ClipId> = if selected.is_empty() {
+            self.session
+                .project()
+                .clips
+                .iter()
+                .filter(|(_, clip)| {
+                    tick.raw() > clip.start.raw()
+                        && tick.raw() < clip.start.raw().saturating_add(clip.length.raw())
+                })
+                .map(|(id, _)| *id)
+                .collect()
+        } else {
+            selected.into_iter().collect()
+        };
+
+        let mut commands = Vec::new();
+        let mut last = None;
+        for clip in targets {
+            if let Some((new_id, mut batch)) = self.split_clip_commands(clip, tick) {
+                commands.append(&mut batch);
+                last = Some(new_id);
+            }
+        }
+        if commands.is_empty() {
+            self.status = Some("no clip crosses the cursor".to_owned());
+            return;
+        }
+        let result = self.session.apply_commands(commands, "Split at cursor");
+        if self.after_edit(result) {
+            self.selected_clip = last;
+            self.status = Some(format!(
+                "split at beat {:.2}",
+                tick.raw() as f64 / PPQ as f64
+            ));
+        }
+    }
+
+    pub fn replace_clips(&mut self, values: Vec<(ClipId, Clip)>) {
+        if values.is_empty() {
+            return;
+        }
+        let commands = values
+            .into_iter()
+            .map(|(clip, value)| {
+                Command::new(CommandKind::Clip(ClipCommand::Replace { clip, value }))
+            })
+            .collect();
+        let result = self.session.apply_commands(commands, "Edit clips");
+        self.after_edit(result);
+    }
+
+    pub fn delete_selected_clips(&mut self) {
+        let mut clips = self.selected_clips();
+        if clips.is_empty() {
+            if let Some(clip) = self.selected_clip {
+                clips.insert(clip);
+            }
+        }
+        if clips.is_empty() {
+            return;
+        }
+        let commands = clips
+            .into_iter()
+            .map(|clip| Command::new(CommandKind::Clip(ClipCommand::Remove { clip })))
+            .collect();
+        let result = self.session.apply_commands(commands, "Delete clips");
+        if self.after_edit(result) {
+            self.selected_clip = None;
         }
     }
 
@@ -921,9 +1272,10 @@ impl Editor {
         };
         let was_playing = self.playing;
         let project = self.session.project().clone();
-        match prepare_state(&project) {
+        let start = frames_at(&project, self.cursor);
+        match prepare_state_at(&project, start) {
             Ok((state, end_frame)) => {
-                if let Err(error) = audio.handle.publish(state) {
+                if let Err(error) = audio.handle.publish_at(state, start) {
                     self.audio_error = Some(error.to_string());
                     self.playing = false;
                     return;
@@ -948,7 +1300,15 @@ impl Editor {
     }
 }
 
-fn prepare_state(project: &Project) -> Result<(RealtimeState, u64), String> {
+fn frames_at(project: &Project, tick: Tick) -> u64 {
+    project
+        .tempo
+        .tick_to_frames(tick)
+        .map(|frames| frames.raw().max(0) as u64)
+        .unwrap_or(0)
+}
+
+fn prepare_state_at(project: &Project, start_frame: u64) -> Result<(RealtimeState, u64), String> {
     let compiled = Compiler::builtin()
         .compile(project)
         .map_err(|error| error.to_string())?;
@@ -956,11 +1316,12 @@ fn prepare_state(project: &Project) -> Result<(RealtimeState, u64), String> {
     let end_frame = project_end_frame(project)
         .map_err(|error| error.to_string())?
         .unwrap_or(u64::from(sample_rate) * 5);
-    let state = RealtimeState::new(
+    let state = RealtimeState::new_at(
         compiled,
         project,
         NonZeroUsize::new(8192).expect("realtime block size is non-zero"),
         Some(end_frame),
+        start_frame,
     )
     .map_err(|error| error.to_string())?;
     Ok((state, end_frame))
@@ -1118,6 +1479,7 @@ mod tests {
             path: None,
             selected_clip: Some(ClipId::from_raw(7)),
             playing: false,
+            cursor: Tick::ZERO,
             status: None,
             error: None,
             audio: None,
@@ -1195,6 +1557,46 @@ mod tests {
         assert_eq!(node.color, Some(0x12_34_56));
         assert!(node.muted);
         assert!(node.soloed);
+    }
+
+    #[test]
+    fn tempo_changes_update_the_document_map() {
+        let mut editor = test_editor();
+        editor.set_tempo_bpm(90.0);
+        assert!((editor.tempo_bpm() - 90.0).abs() < 0.01);
+        assert_eq!(editor.session.project().tempo.points().count(), 1);
+        assert_eq!(editor.session.undo_label(), Some("Edit tempo"));
+    }
+
+    #[test]
+    fn fader_parameters_are_committed_as_value_only_changes() {
+        let mut editor = test_editor();
+        let track = NodeId::from_raw(1);
+        editor.commit_param(track, "gain_db", -6.0);
+        editor.commit_param(track, "pan", 0.5);
+
+        assert_eq!(editor.param_value(track, "gain_db"), Some(-6.0));
+        assert_eq!(editor.param_value(track, "pan"), Some(0.5));
+        assert_eq!(editor.session.undo_label(), Some("Set parameter"));
+    }
+
+    #[test]
+    fn marquee_selection_can_split_and_delete_several_clips() {
+        let mut editor = test_editor();
+        let clip = editor.selected_clip().unwrap();
+        editor.split_clip(clip, Tick::from_raw(4 * PPQ));
+        assert_eq!(editor.session.project().clips.len(), 2);
+
+        editor.select_all_clips();
+        assert_eq!(editor.selected_clips().len(), 2);
+
+        editor.set_cursor(Tick::from_raw(8 * PPQ));
+        editor.split_selected_at_cursor();
+        assert_eq!(editor.session.project().clips.len(), 3);
+
+        editor.select_all_clips();
+        editor.delete_selected_clips();
+        assert!(editor.session.project().clips.is_empty());
     }
 
     #[test]

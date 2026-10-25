@@ -24,8 +24,18 @@ impl RealtimeState {
         block_size: NonZeroUsize,
         end_frame: Option<u64>,
     ) -> Result<Self, RealtimeStateError> {
+        Self::new_at(compiled, project, block_size, end_frame, 0)
+    }
+
+    pub fn new_at(
+        compiled: CompiledProject,
+        project: &Project,
+        block_size: NonZeroUsize,
+        end_frame: Option<u64>,
+        start_frame: u64,
+    ) -> Result<Self, RealtimeStateError> {
         Ok(Self {
-            engine: Engine::new(compiled, block_size)?,
+            engine: Engine::new_at(compiled, block_size, start_frame)?,
             scheduler: Scheduler::new(project)?,
             end_frame,
         })
@@ -34,6 +44,7 @@ impl RealtimeState {
 
 enum ToAudio {
     Replace(Box<RealtimeState>),
+    Seek(u64),
     Param {
         address: ParamAddress,
         value: ParamValue,
@@ -166,11 +177,21 @@ impl RealtimeEngine {
                     if let Some(previous) = self.state.replace(*state) {
                         self.pending_retired = Some(Box::new(previous));
                     }
-                    self.position.store(0, Ordering::Relaxed);
+                    if let Some(state) = &self.state {
+                        self.position
+                            .store(state.engine.start_frame(), Ordering::Relaxed);
+                    }
                     self.finished.store(false, Ordering::Relaxed);
                     if self.pending_retired.is_some() {
                         break;
                     }
+                }
+                ToAudio::Seek(frame) => {
+                    if let Some(state) = &mut self.state {
+                        state.engine.seek(frame);
+                    }
+                    self.position.store(frame, Ordering::Relaxed);
+                    self.finished.store(false, Ordering::Relaxed);
                 }
                 ToAudio::Param { address, value } => {
                     if let Some(state) = &mut self.state {
@@ -217,10 +238,25 @@ impl RealtimeHandle {
     }
 
     pub fn publish(&mut self, state: RealtimeState) -> Result<(), RealtimeError> {
+        self.publish_at(state, 0)
+    }
+
+    pub fn publish_at(
+        &mut self,
+        mut state: RealtimeState,
+        start_frame: u64,
+    ) -> Result<(), RealtimeError> {
+        state.engine.seek(start_frame);
         self.collect_retired();
-        self.position.store(0, Ordering::Relaxed);
+        self.position.store(start_frame, Ordering::Relaxed);
         self.finished.store(false, Ordering::Release);
         self.send(ToAudio::Replace(Box::new(state)))
+    }
+
+    pub fn seek(&mut self, frame: u64) -> Result<(), RealtimeError> {
+        self.position.store(frame, Ordering::Relaxed);
+        self.finished.store(false, Ordering::Release);
+        self.send(ToAudio::Seek(frame))
     }
 
     pub fn position(&self) -> u64 {
@@ -376,6 +412,33 @@ mod tests {
         handle.publish(state(Constant(0.75), None)).unwrap();
         audio.process(&mut output, 2, 48_000);
         assert_eq!(output, [0.75; 4]);
+        handle.collect_retired();
+    }
+
+    #[test]
+    fn seeking_moves_the_engine_position() {
+        let (mut audio, mut handle) = realtime(state(Constant(0.5), None), 8);
+        handle.play().unwrap();
+        let mut output = [0.0; 4];
+        audio.process(&mut output, 2, 48_000);
+        assert_eq!(handle.position(), 2);
+
+        handle.seek(1_000).unwrap();
+        audio.process(&mut output, 2, 48_000);
+        assert_eq!(handle.position(), 1_002);
+    }
+
+    #[test]
+    fn publishing_at_a_frame_starts_there_and_reports_it() {
+        let (mut audio, mut handle) = realtime(state(Constant(0.25), None), 8);
+        handle.play().unwrap();
+        handle.publish_at(state(Constant(0.75), None), 500).unwrap();
+        assert_eq!(handle.position(), 500);
+
+        let mut output = [0.0; 4];
+        audio.process(&mut output, 2, 48_000);
+        assert_eq!(output, [0.75; 4]);
+        assert_eq!(handle.position(), 502);
         handle.collect_retired();
     }
 

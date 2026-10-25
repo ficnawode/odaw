@@ -210,6 +210,29 @@ impl TempoMap {
         self.segments.iter().map(|segment| segment.point)
     }
 
+    pub fn frames_to_tick(&self, frames: Frames) -> Result<Tick, TempoError> {
+        let segment = self
+            .segments
+            .iter()
+            .rev()
+            .find(|segment| segment.anchor_frames <= frames)
+            .or_else(|| self.segments.front())
+            .expect("a tempo map always has at least one segment");
+
+        let delta_frames = i128::from(frames.raw()) - i128::from(segment.anchor_frames.raw());
+        let numerator = delta_frames
+            .checked_mul(i128::from(PPQ))
+            .and_then(|value| value.checked_mul(i128::from(MICROS_PER_SECOND)))
+            .ok_or(TempoError::OutOfRange)?;
+        let denominator = i128::from(segment.point.micros_per_quarter)
+            .checked_mul(i128::from(self.sample_rate))
+            .ok_or(TempoError::OutOfRange)?;
+        let ticks = i128::from(segment.point.tick.raw()) + numerator.div_euclid(denominator);
+        i64::try_from(ticks)
+            .map(Tick::from_raw)
+            .map_err(|_| TempoError::OutOfRange)
+    }
+
     pub fn tick_to_frames(&self, tick: Tick) -> Result<Frames, TempoError> {
         let segment = self
             .segments
@@ -329,6 +352,19 @@ mod tests {
         assert_eq!(
             tempo.tick_to_frames(Tick::from_raw(8 * PPQ)),
             Ok(Frames::from_raw(288_000))
+        );
+    }
+
+    #[test]
+    fn frames_convert_back_to_ticks() {
+        let tempo = constant(48_000, 500_000);
+        assert_eq!(
+            tempo.frames_to_tick(Frames::from_raw(24_000)),
+            Ok(Tick::from_raw(PPQ))
+        );
+        assert_eq!(
+            tempo.frames_to_tick(Frames::from_raw(96_000)),
+            Ok(Tick::from_raw(4 * PPQ))
         );
     }
 

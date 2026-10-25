@@ -7,6 +7,8 @@ pub const SINE_KIND: &str = "builtin.sine";
 pub const POLY_KIND: &str = "builtin.poly";
 pub const GAIN_KIND: &str = "builtin.gain";
 pub const PASS_KIND: &str = "builtin.pass";
+pub const STRIP_GAIN_PARAM: &str = "gain_db";
+pub const STRIP_PAN_PARAM: &str = "pan";
 
 #[derive(Debug)]
 pub struct Sine {
@@ -51,7 +53,6 @@ impl DeviceProcessor for Sine {
 pub struct Gain {
     gain: ParamAddress,
 }
-
 impl Gain {
     pub fn new(node: NodeId) -> Self {
         Self {
@@ -68,6 +69,69 @@ impl DeviceProcessor for Gain {
         let gain = finite_or(block.params.float(&self.gain, 1.0), 1.0) as f32;
         for (destination, input) in block.output.iter_mut().zip(block.input) {
             *destination = *input * gain;
+        }
+    }
+}
+
+/// Track/master output stage: decibel gain and constant-power-free stereo pan.
+///
+/// Panning is linear so that a centre pan leaves both channels at unity; hard
+/// left or right mutes the opposite channel instead of boosting the other one.
+#[derive(Debug)]
+pub struct ChannelStrip {
+    gain: ParamAddress,
+    pan: ParamAddress,
+}
+
+impl ChannelStrip {
+    pub fn new(node: NodeId) -> Self {
+        Self {
+            gain: ParamAddress {
+                node,
+                param: ParamId::new(STRIP_GAIN_PARAM),
+            },
+            pan: ParamAddress {
+                node,
+                param: ParamId::new(STRIP_PAN_PARAM),
+            },
+        }
+    }
+}
+
+impl DeviceProcessor for ChannelStrip {
+    fn process(&mut self, block: &mut Block<'_>) {
+        let gain_db = finite_or(block.params.float(&self.gain, 0.0), 0.0).clamp(-96.0, 24.0);
+        let gain = 10f32.powf(gain_db as f32 / 20.0);
+        let pan = finite_or(block.params.float(&self.pan, 0.0), 0.0).clamp(-1.0, 1.0) as f32;
+        if pan == 0.0 {
+            for (destination, input) in block.output.iter_mut().zip(block.input) {
+                *destination = *input * gain;
+            }
+            return;
+        }
+
+        let left = gain * (1.0 - pan).clamp(0.0, 1.0);
+        let right = gain * (1.0 + pan).clamp(0.0, 1.0);
+        match block.channels {
+            0 => {}
+            1 => {
+                for (destination, input) in block.output.iter_mut().zip(block.input) {
+                    *destination = *input * gain;
+                }
+            }
+            _ => {
+                for (input, output) in block
+                    .input
+                    .chunks_exact(block.channels)
+                    .zip(block.output.chunks_exact_mut(block.channels))
+                {
+                    output[0] = input[0] * left;
+                    output[1] = input[1] * right;
+                    for channel in 2..block.channels {
+                        output[channel] = input[channel] * gain;
+                    }
+                }
+            }
         }
     }
 }
@@ -352,6 +416,71 @@ mod tests {
         gain.process(&mut block);
 
         assert_eq!(output, vec![0.5, 1.0, 1.5, 2.0]);
+    }
+
+    #[test]
+    fn channel_strip_applies_db_gain_and_linear_pan() {
+        let node = NodeId::from_raw(1);
+        let mut params = ParamBuffer::new();
+        params.ensure(
+            ParamAddress {
+                node,
+                param: ParamId::new(STRIP_GAIN_PARAM),
+            },
+            odaw_core::ParamValue::Float(-6.0),
+        );
+        params.ensure(
+            ParamAddress {
+                node,
+                param: ParamId::new(STRIP_PAN_PARAM),
+            },
+            odaw_core::ParamValue::Float(1.0),
+        );
+
+        let mut strip = ChannelStrip::new(node);
+        let input = vec![1.0, 1.0, 0.5, 0.5];
+        let mut output = output_buffer(2, 2);
+        let mut block = Block {
+            node,
+            sample_rate: 48_000,
+            channels: 2,
+            start_frame: 0,
+            frames: 2,
+            input: &input,
+            output: &mut output,
+            params: &params,
+            event_target: None,
+            events: &[],
+        };
+        strip.process(&mut block);
+
+        let gain = 10f32.powf(-6.0 / 20.0);
+        assert!((output[0] - 0.0).abs() < 1e-6);
+        assert!((output[1] - gain).abs() < 1e-6);
+        assert!((output[2] - 0.0).abs() < 1e-6);
+        assert!((output[3] - 0.5 * gain).abs() < 1e-6);
+    }
+
+    #[test]
+    fn channel_strip_at_unity_is_transparent() {
+        let node = NodeId::from_raw(1);
+        let params = ParamBuffer::new();
+        let input = vec![0.25, -0.25, 0.5, -0.5];
+        let mut output = output_buffer(2, 2);
+        let mut block = Block {
+            node,
+            sample_rate: 48_000,
+            channels: 2,
+            start_frame: 0,
+            frames: 2,
+            input: &input,
+            output: &mut output,
+            params: &params,
+            event_target: None,
+            events: &[],
+        };
+        ChannelStrip::new(node).process(&mut block);
+        assert_eq!(output, input);
     }
 
     #[test]

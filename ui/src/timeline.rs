@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use eframe::egui::{
@@ -6,10 +7,11 @@ use eframe::egui::{
 use odaw_core::{Clip, ClipContent, ClipId, Node, NodeId, NodeRole, PPQ, Project, Tick};
 
 use crate::editor::{Editor, TRACK_COLORS};
+use crate::mixer::MixerState;
 use crate::piano_roll::{Snap, snap_tick};
 
-const ROW_HEIGHT: f32 = 52.0;
-const HEADER_WIDTH: f32 = 205.0;
+const ROW_HEIGHT: f32 = 58.0;
+const HEADER_WIDTH: f32 = 215.0;
 const RULER_HEIGHT: f32 = 24.0;
 
 #[derive(Clone, Debug)]
@@ -17,7 +19,6 @@ struct TrackRow {
     id: NodeId,
     name: String,
     color: Color32,
-    devices: Vec<String>,
     clips: Vec<ClipRow>,
 }
 
@@ -37,18 +38,42 @@ enum DragMode {
 
 #[derive(Clone, Debug)]
 struct ClipDrag {
-    clip: ClipId,
-    original: Clip,
-    preview: Clip,
-    track: NodeId,
+    primary: ClipId,
+    primary_track: NodeId,
+    originals: Vec<(ClipId, Clip)>,
+    previews: Vec<(ClipId, Clip)>,
     mode: DragMode,
     start_pointer: Pos2,
+}
+
+impl ClipDrag {
+    fn preview(&self, clip: ClipId) -> Option<&Clip> {
+        self.previews
+            .iter()
+            .find(|(id, _)| *id == clip)
+            .map(|(_, value)| value)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct EmptyDrag {
+    start: Pos2,
+    current: Pos2,
+    moved: bool,
+}
+
+impl EmptyDrag {
+    fn rect(&self) -> Rect {
+        Rect::from_two_pos(self.start, self.current)
+    }
 }
 
 #[derive(Debug)]
 pub struct TimelineState {
     pub pixels_per_beat: f32,
     drag: Option<ClipDrag>,
+    marquee: Option<EmptyDrag>,
+    seek_drag: Option<Pos2>,
     context_clip: Option<(NodeId, ClipId)>,
     context_tick: Option<Tick>,
     pub hover_target: Option<(NodeId, Tick)>,
@@ -60,6 +85,8 @@ impl Default for TimelineState {
         Self {
             pixels_per_beat: 84.0,
             drag: None,
+            marquee: None,
+            seek_drag: None,
             context_clip: None,
             context_tick: None,
             hover_target: None,
@@ -71,20 +98,36 @@ impl Default for TimelineState {
 impl TimelineState {
     pub fn clear(&mut self) {
         self.drag = None;
+        self.marquee = None;
+        self.seek_drag = None;
         self.context_clip = None;
         self.context_tick = None;
     }
 }
 
-pub fn show(ui: &mut egui::Ui, editor: &mut Editor, state: &mut TimelineState, snap: &mut Snap) {
+pub fn show(
+    ui: &mut egui::Ui,
+    editor: &mut Editor,
+    mixer: &mut MixerState,
+    state: &mut TimelineState,
+    snap: &mut Snap,
+) {
     let project = editor.session.project().clone();
     let tracks = track_rows(&project, editor);
+    let master = master_node(&project);
     let selected_track = editor.selected_track();
-    let selected_clip = editor.selected_clip();
+    let selected_clips = editor.selected_clips();
 
     ui.horizontal_wrapped(|ui| {
         if ui.button("+ Track").clicked() {
             editor.add_track();
+        }
+        if ui
+            .button("Split @ cursor")
+            .on_hover_text("Split the selected clips at the red cursor (Ctrl+E)")
+            .clicked()
+        {
+            editor.split_selected_at_cursor();
         }
         ui.separator();
         ui.label("Zoom");
@@ -100,7 +143,8 @@ pub fn show(ui: &mut egui::Ui, editor: &mut Editor, state: &mut TimelineState, s
             });
         ui.separator();
         ui.small(
-            "Drag clips to move · edges resize · right-click actions · Ctrl-scroll/pinch zoom",
+            "Click the ruler or empty space to seek · drag empty space to marquee-select · \
+             Shift adds · Ctrl+E splits at cursor",
         );
     });
 
@@ -110,7 +154,8 @@ pub fn show(ui: &mut egui::Ui, editor: &mut Editor, state: &mut TimelineState, s
     let total_beats = (end_tick.raw().max(1) as f64 / PPQ as f64).ceil() as i64;
     let viewport_width = (ui.available_width() - HEADER_WIDTH - 18.0).max(320.0);
     let content_width = (total_beats as f32 * state.pixels_per_beat).max(viewport_width);
-    let grid_height = (RULER_HEIGHT + tracks.len().max(1) as f32 * ROW_HEIGHT)
+    let row_count = tracks.len() + usize::from(master.is_some());
+    let grid_height = (RULER_HEIGHT + row_count.max(1) as f32 * ROW_HEIGHT)
         .max((ui.available_height() - 10.0).max(160.0));
 
     ui.horizontal_top(|ui| {
@@ -122,14 +167,21 @@ pub fn show(ui: &mut egui::Ui, editor: &mut Editor, state: &mut TimelineState, s
                 |ui| {
                     ui.set_width(HEADER_WIDTH);
                     ui.add_space(6.0);
-                    ui.small(format!(
-                        "Tracks · {track_count}",
-                        track_count = tracks.len()
-                    ));
+                    ui.small(format!("Tracks · {}", tracks.len()));
                 },
             );
             for track in &tracks {
-                track_header(ui, editor, track, selected_track == Some(track.id), state);
+                track_header(
+                    ui,
+                    editor,
+                    mixer,
+                    track,
+                    selected_track == Some(track.id),
+                    state,
+                );
+            }
+            if let Some(master) = master {
+                master_header(ui, editor, mixer, master);
             }
         });
 
@@ -146,9 +198,12 @@ pub fn show(ui: &mut egui::Ui, editor: &mut Editor, state: &mut TimelineState, s
                     grid_height,
                     state.pixels_per_beat,
                     total_beats,
+                    tracks.len(),
+                    master.is_some(),
                 );
 
                 let pointer = ui.input(|input| input.pointer.hover_pos());
+                let shift = ui.input(|input| input.modifiers.shift);
                 let mut hits: Vec<(Rect, NodeId, ClipId, Clip)> = Vec::new();
                 let drag = state.drag.clone();
 
@@ -156,17 +211,17 @@ pub fn show(ui: &mut egui::Ui, editor: &mut Editor, state: &mut TimelineState, s
                     for clip in &track.clips {
                         let preview = drag
                             .as_ref()
-                            .filter(|drag| drag.clip == clip.id)
-                            .map(|drag| (&drag.preview, drag.track));
-                        let (draw, draw_track) =
-                            preview.map_or((&clip.clip, track.id), |(clip, track)| (clip, track));
+                            .and_then(|drag| drag.preview(clip.id))
+                            .map(|value| (value, value.node))
+                            .unwrap_or((&clip.clip, track.id));
+                        let (draw, draw_track) = preview;
                         let draw_index = tracks
                             .iter()
                             .position(|row| row.id == draw_track)
                             .unwrap_or(index);
                         let draw_y = origin.y + RULER_HEIGHT + draw_index as f32 * ROW_HEIGHT;
                         let rect = clip_rect(draw, origin, draw_y, state.pixels_per_beat);
-                        let selected = selected_clip == Some(clip.id);
+                        let selected = selected_clips.contains(&clip.id);
                         let hovered = pointer.is_some_and(|position| rect.contains(position));
                         draw_clip(
                             &painter,
@@ -177,7 +232,10 @@ pub fn show(ui: &mut egui::Ui, editor: &mut Editor, state: &mut TimelineState, s
                             selected,
                             hovered,
                         );
-                        if preview.is_some() {
+                        if drag
+                            .as_ref()
+                            .is_some_and(|drag| drag.preview(clip.id).is_some())
+                        {
                             painter.line_segment(
                                 [rect.left_top(), rect.right_top()],
                                 Stroke::new(2.0_f32, Color32::from_rgb(118, 224, 166)),
@@ -190,10 +248,7 @@ pub fn show(ui: &mut egui::Ui, editor: &mut Editor, state: &mut TimelineState, s
                 if let Some(position) = pointer {
                     let track = track_at_y(position.y, origin, &tracks);
                     let tick = if position.x >= origin.x {
-                        Some(Tick::from_raw(
-                            ((position.x - origin.x) / state.pixels_per_beat * PPQ as f32).round()
-                                as i64,
-                        ))
+                        Some(tick_at(position.x, origin, state.pixels_per_beat, *snap))
                     } else {
                         None
                     };
@@ -231,86 +286,229 @@ pub fn show(ui: &mut egui::Ui, editor: &mut Editor, state: &mut TimelineState, s
                             .iter()
                             .find(|(rect, _, _, _)| rect.contains(position))
                             .map(|(_, track, clip, _)| (*track, *clip));
-                        state.context_tick = Some(Tick::from_raw(
-                            ((position.x - origin.x) / state.pixels_per_beat * PPQ as f32)
-                                .round()
-                                .max(0.0) as i64,
-                        ));
+                        state.context_tick =
+                            Some(tick_at(position.x, origin, state.pixels_per_beat, *snap));
                     }
                 }
 
                 if ui.input(|input| input.pointer.primary_pressed()) && response.hovered() {
                     if let Some(position) = pointer {
-                        if let Some((rect, track, clip, value)) =
-                            hits.iter().find(|(rect, _, _, _)| rect.contains(position))
-                        {
-                            editor.select_clip(*track, *clip);
-                            let mode = if position.x > rect.max.x - 7.0 {
-                                DragMode::ResizeEnd
-                            } else if position.x < rect.min.x + 7.0 {
-                                DragMode::ResizeStart
+                        let ruler = position.y < origin.y + RULER_HEIGHT;
+                        let track_lane = track_at_y(position.y, origin, &tracks).is_some();
+                        let hit = hits
+                            .iter()
+                            .find(|(rect, _, _, _)| rect.contains(position))
+                            .cloned();
+                        state.marquee = None;
+                        state.seek_drag = None;
+
+                        if ruler {
+                            state.seek_drag = Some(position);
+                            let tick = tick_at(position.x, origin, state.pixels_per_beat, *snap);
+                            editor.preview_cursor(tick);
+                        } else if let Some((rect, track, clip, value)) = hit {
+                            if shift {
+                                editor.toggle_clip(track, clip);
+                                state.drag = None;
                             } else {
-                                DragMode::Move
-                            };
-                            state.drag = Some(ClipDrag {
-                                clip: *clip,
-                                original: value.clone(),
-                                preview: value.clone(),
-                                track: *track,
-                                mode,
-                                start_pointer: position,
+                                if !editor.is_clip_selected(clip) {
+                                    editor.select_clip(track, clip);
+                                }
+                                let selected = editor.selected_clips();
+                                let mut originals: Vec<(ClipId, Clip)> = selected
+                                    .iter()
+                                    .filter_map(|id| {
+                                        editor
+                                            .session
+                                            .project()
+                                            .clips
+                                            .get(id)
+                                            .map(|clip| (*id, clip.clone()))
+                                    })
+                                    .collect();
+                                if originals.is_empty() {
+                                    originals.push((clip, value.clone()));
+                                }
+                                let single = originals.len() == 1;
+                                let mode = if single && position.x > rect.max.x - 7.0 {
+                                    DragMode::ResizeEnd
+                                } else if single && position.x < rect.min.x + 7.0 {
+                                    DragMode::ResizeStart
+                                } else {
+                                    DragMode::Move
+                                };
+                                state.drag = Some(ClipDrag {
+                                    primary: clip,
+                                    primary_track: track,
+                                    previews: originals.clone(),
+                                    originals,
+                                    mode,
+                                    start_pointer: position,
+                                });
+                            }
+                        } else if track_lane || position.y < origin.y + grid_height {
+                            state.marquee = Some(EmptyDrag {
+                                start: position,
+                                current: position,
+                                moved: false,
                             });
-                        } else {
-                            state.drag = None;
                         }
                     }
                 }
 
-                if let (Some(drag), Some(position)) = (state.drag.clone(), pointer) {
+                if let Some(position) = pointer {
                     if ui.input(|input| input.pointer.primary_down()) {
-                        let delta_ticks = ((position.x - drag.start_pointer.x)
-                            / state.pixels_per_beat
-                            * PPQ as f32)
-                            .round() as i64;
-                        let target_track =
-                            track_at_y(position.y, origin, &tracks).unwrap_or(drag.track);
-                        let mut preview = drag.original.clone();
-                        match drag.mode {
-                            DragMode::Move => {
-                                preview.start = Tick::from_raw(
-                                    snap_tick(drag.original.start.raw() + delta_ticks, *snap)
-                                        .max(0),
-                                );
-                                preview.node = target_track;
-                            }
-                            DragMode::ResizeStart => {
-                                let end = drag.original.start.raw() + drag.original.length.raw();
-                                let start =
-                                    snap_tick(drag.original.start.raw() + delta_ticks, *snap)
-                                        .clamp(0, (end - 1).max(0));
-                                preview.start = Tick::from_raw(start);
-                                preview.length = Tick::from_raw((end - start).max(1));
-                            }
-                            DragMode::ResizeEnd => {
-                                preview.length = Tick::from_raw(
-                                    snap_tick(drag.original.length.raw() + delta_ticks, *snap)
-                                        .max(1),
-                                );
-                            }
+                        if state.seek_drag.is_some() {
+                            let tick = tick_at(position.x, origin, state.pixels_per_beat, *snap);
+                            editor.preview_cursor(tick);
                         }
-                        state.drag = Some(ClipDrag {
-                            preview,
-                            track: target_track,
-                            ..drag
-                        });
+                        if let Some(drag) = state.drag.clone() {
+                            let delta_ticks = ((position.x - drag.start_pointer.x)
+                                / state.pixels_per_beat
+                                * PPQ as f32)
+                                .round() as i64;
+                            let target_track = track_at_y(position.y, origin, &tracks)
+                                .unwrap_or(drag.primary_track);
+                            let target_index = tracks
+                                .iter()
+                                .position(|row| row.id == target_track)
+                                .unwrap_or(0);
+                            let primary_index = tracks
+                                .iter()
+                                .position(|row| row.id == drag.primary_track)
+                                .unwrap_or(target_index);
+                            let track_delta = target_index as isize - primary_index as isize;
+
+                            let mut previews = drag.previews.clone();
+                            match drag.mode {
+                                DragMode::Move => {
+                                    for (id, preview) in &mut previews {
+                                        let Some((_, original)) =
+                                            drag.originals.iter().find(|(other, _)| other == id)
+                                        else {
+                                            continue;
+                                        };
+                                        preview.start = Tick::from_raw(
+                                            snap_tick(original.start.raw() + delta_ticks, *snap)
+                                                .max(0),
+                                        );
+                                        if let Some(original_index) =
+                                            tracks.iter().position(|row| row.id == original.node)
+                                        {
+                                            let index = (original_index as isize + track_delta)
+                                                .clamp(0, tracks.len() as isize - 1)
+                                                as usize;
+                                            preview.node = tracks[index].id;
+                                        }
+                                    }
+                                }
+                                DragMode::ResizeStart => {
+                                    if let Some((_, original)) =
+                                        drag.originals.iter().find(|(id, _)| *id == drag.primary)
+                                    {
+                                        let end = original.start.raw() + original.length.raw();
+                                        let start =
+                                            snap_tick(original.start.raw() + delta_ticks, *snap)
+                                                .clamp(0, (end - 1).max(0));
+                                        if let Some((_, preview)) =
+                                            previews.iter_mut().find(|(id, _)| *id == drag.primary)
+                                        {
+                                            preview.start = Tick::from_raw(start);
+                                            preview.length = Tick::from_raw((end - start).max(1));
+                                        }
+                                    }
+                                }
+                                DragMode::ResizeEnd => {
+                                    if let Some((_, original)) =
+                                        drag.originals.iter().find(|(id, _)| *id == drag.primary)
+                                    {
+                                        if let Some((_, preview)) =
+                                            previews.iter_mut().find(|(id, _)| *id == drag.primary)
+                                        {
+                                            preview.length = Tick::from_raw(
+                                                snap_tick(
+                                                    original.length.raw() + delta_ticks,
+                                                    *snap,
+                                                )
+                                                .max(1),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            state.drag = Some(ClipDrag { previews, ..drag });
+                        }
+                        if let Some(drag) = state.marquee.clone() {
+                            let moved = drag.start.distance(position) > 4.0;
+                            state.marquee = Some(EmptyDrag {
+                                current: position,
+                                moved,
+                                ..drag
+                            });
+                        }
                     }
                 }
 
                 if ui.input(|input| input.pointer.primary_released()) {
                     if let Some(drag) = state.drag.take() {
-                        if drag.preview != drag.original {
-                            editor.replace_clip(drag.clip, drag.preview);
+                        let changed: Vec<(ClipId, Clip)> = drag
+                            .previews
+                            .into_iter()
+                            .filter_map(|(id, preview)| {
+                                let (_, original) =
+                                    drag.originals.iter().find(|(other, _)| *other == id)?;
+                                (preview != *original).then_some((id, preview))
+                            })
+                            .collect();
+                        editor.replace_clips(changed);
+                    }
+                    if let Some(drag) = state.marquee.take() {
+                        if drag.moved {
+                            let rect = drag.rect();
+                            let clips: BTreeSet<ClipId> = hits
+                                .iter()
+                                .filter(|(clip_rect, _, _, _)| rect.intersects(*clip_rect))
+                                .map(|(_, _, clip, _)| *clip)
+                                .collect();
+                            if clips.is_empty() && !shift {
+                                editor.clear_clip_selection();
+                            } else if !clips.is_empty() {
+                                if shift {
+                                    let mut combined = editor.selected_clips();
+                                    combined.extend(clips);
+                                    editor.select_clips(combined);
+                                } else {
+                                    editor.select_clips(clips);
+                                }
+                            }
+                        } else if let Some(position) = pointer {
+                            editor.clear_clip_selection();
+                            let tick = tick_at(position.x, origin, state.pixels_per_beat, *snap);
+                            editor.set_cursor(tick);
                         }
+                    }
+                    if state.seek_drag.take().is_some() {
+                        if let Some(position) = pointer {
+                            let tick = tick_at(position.x, origin, state.pixels_per_beat, *snap);
+                            editor.set_cursor(tick);
+                        }
+                    }
+                }
+
+                if let Some(drag) = &state.marquee {
+                    if drag.moved {
+                        let rect = drag.rect();
+                        painter.rect_filled(
+                            rect,
+                            0.0,
+                            Color32::from_rgba_unmultiplied(90, 160, 255, 28),
+                        );
+                        painter.rect_stroke(
+                            rect,
+                            0.0,
+                            Stroke::new(1.0_f32, Color32::from_rgb(112, 178, 255)),
+                            egui::StrokeKind::Inside,
+                        );
                     }
                 }
 
@@ -335,15 +533,26 @@ pub fn show(ui: &mut egui::Ui, editor: &mut Editor, state: &mut TimelineState, s
                     }
                 }
 
-                let progress = editor.progress();
-                let playhead_x = origin.x + progress * content_width;
+                let cursor = editor.playhead_tick();
+                let playhead_x = (origin.x
+                    + cursor.raw().max(0) as f32 / PPQ as f32 * state.pixels_per_beat)
+                    .clamp(origin.x, origin.x + content_width);
                 painter.line_segment(
                     [
-                        pos2(playhead_x, origin.y + RULER_HEIGHT - 6.0),
+                        pos2(playhead_x, origin.y + RULER_HEIGHT - 8.0),
                         pos2(playhead_x, origin.y + grid_height),
                     ],
                     Stroke::new(1.5_f32, Color32::from_rgb(244, 92, 92)),
                 );
+                painter.add(egui::Shape::convex_polygon(
+                    vec![
+                        pos2(playhead_x - 5.0, origin.y + 2.0),
+                        pos2(playhead_x + 5.0, origin.y + 2.0),
+                        pos2(playhead_x, origin.y + 10.0),
+                    ],
+                    Color32::from_rgb(244, 92, 92),
+                    Stroke::NONE,
+                ));
 
                 let context_clip = state.context_clip;
                 let context_tick = state.context_tick;
@@ -363,12 +572,36 @@ pub fn show(ui: &mut egui::Ui, editor: &mut Editor, state: &mut TimelineState, s
                                 ui.close();
                             }
                         }
+                        if ui.button("Split at cursor").clicked() {
+                            editor.split_selected_at_cursor();
+                            ui.close();
+                        }
                         ui.separator();
                         if ui.button("Delete clip").clicked() {
                             editor.delete_clip(clip);
                             ui.close();
                         }
                     } else {
+                        if let Some(tick) = context_tick {
+                            if ui.button("Move cursor here").clicked() {
+                                editor.set_cursor(tick);
+                                ui.close();
+                            }
+                        }
+                        if ui.button("Split clips at cursor").clicked() {
+                            editor.split_selected_at_cursor();
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui.button("Select all clips").clicked() {
+                            editor.select_all_clips();
+                            ui.close();
+                        }
+                        if ui.button("Clear selection").clicked() {
+                            editor.clear_clip_selection();
+                            ui.close();
+                        }
+                        ui.separator();
                         if ui.button("Add track").clicked() {
                             editor.add_track();
                             ui.close();
@@ -388,6 +621,7 @@ pub fn show(ui: &mut egui::Ui, editor: &mut Editor, state: &mut TimelineState, s
 fn track_header(
     ui: &mut egui::Ui,
     editor: &mut Editor,
+    mixer: &mut MixerState,
     track: &TrackRow,
     selected: bool,
     state: &mut TimelineState,
@@ -470,20 +704,38 @@ fn track_header(
                 }
             });
             ui.horizontal(|ui| {
-                ui.add_space(14.0);
-                ui.small(
-                    track
-                        .devices
-                        .iter()
-                        .map(String::as_str)
-                        .collect::<Vec<_>>()
-                        .join(" · "),
-                );
+                ui.spacing_mut().item_spacing.x = 3.0;
+                ui.add_space(8.0);
+                mixer.gain(ui, editor, track.id, true);
+                mixer.pan(ui, editor, track.id, true);
             });
         },
     );
 }
 
+fn master_header(ui: &mut egui::Ui, editor: &mut Editor, mixer: &mut MixerState, master: NodeId) {
+    ui.allocate_ui_with_layout(
+        vec2(HEADER_WIDTH, ROW_HEIGHT),
+        Layout::top_down(Align::Min),
+        |ui| {
+            ui.set_width(HEADER_WIDTH);
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.colored_label(Color32::from_rgb(196, 202, 214), "◆");
+                ui.strong("Master");
+                ui.small("stereo out");
+            });
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 3.0;
+                ui.add_space(8.0);
+                mixer.gain(ui, editor, master, true);
+                mixer.pan(ui, editor, master, true);
+            });
+        },
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
 fn draw_grid(
     painter: &egui::Painter,
     origin: Pos2,
@@ -491,6 +743,8 @@ fn draw_grid(
     height: f32,
     pixels_per_beat: f32,
     total_beats: i64,
+    track_rows: usize,
+    has_master: bool,
 ) {
     painter.rect_filled(
         Rect::from_min_size(origin, vec2(width, height)),
@@ -502,6 +756,22 @@ fn draw_grid(
         0.0,
         Color32::from_rgb(27, 29, 34),
     );
+
+    if has_master {
+        let y = origin.y + RULER_HEIGHT + track_rows as f32 * ROW_HEIGHT;
+        painter.rect_filled(
+            Rect::from_min_size(pos2(origin.x, y), vec2(width, ROW_HEIGHT)),
+            0.0,
+            Color32::from_rgb(20, 22, 26),
+        );
+        painter.text(
+            pos2(origin.x + 8.0, y + ROW_HEIGHT / 2.0),
+            Align2::LEFT_CENTER,
+            "MASTER OUT · STEREO",
+            FontId::monospace(8.0),
+            Color32::from_rgb(92, 98, 110),
+        );
+    }
 
     let subdivisions = if pixels_per_beat >= 220.0 {
         4
@@ -583,6 +853,12 @@ fn draw_clip(
         painter.line_segment(
             [rect.left_top(), rect.right_top()],
             Stroke::new(2.0_f32, Color32::from_rgb(250, 205, 96)),
+        );
+        painter.rect_stroke(
+            rect,
+            4.0,
+            Stroke::new(1.0_f32, Color32::from_rgb(250, 205, 96)),
+            egui::StrokeKind::Inside,
         );
     } else if hovered {
         painter.line_segment(
@@ -671,13 +947,6 @@ fn track_rows(project: &Project, editor: &Editor) -> Vec<TrackRow> {
                 .clone()
                 .unwrap_or_else(|| format!("Track {}", id.raw())),
             color: track_color(node, *id),
-            devices: node
-                .rack
-                .iter()
-                .filter_map(|device| project.nodes.get(device))
-                .filter_map(|node| node.kind.as_ref())
-                .map(|kind| kind.as_str().to_owned())
-                .collect(),
             clips: node
                 .clips
                 .iter()
@@ -694,6 +963,14 @@ fn track_rows(project: &Project, editor: &Editor) -> Vec<TrackRow> {
                 .collect(),
         })
         .collect()
+}
+
+fn master_node(project: &Project) -> Option<NodeId> {
+    project
+        .nodes
+        .iter()
+        .find(|(_, node)| node.role == NodeRole::Master)
+        .map(|(id, _)| *id)
 }
 
 fn track_color(node: &Node, id: NodeId) -> Color32 {
@@ -735,6 +1012,11 @@ fn track_at_y(y: f32, origin: Pos2, tracks: &[TrackRow]) -> Option<NodeId> {
         return None;
     }
     tracks.get(row as usize).map(|track| track.id)
+}
+
+fn tick_at(x: f32, origin: Pos2, pixels_per_beat: f32, snap: Snap) -> Tick {
+    let raw = ((x - origin.x) / pixels_per_beat * PPQ as f32).round() as i64;
+    Tick::from_raw(snap_tick(raw.max(0), snap))
 }
 
 fn clip_rect(clip: &Clip, origin: Pos2, row_y: f32, pixels_per_beat: f32) -> Rect {

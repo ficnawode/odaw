@@ -2,10 +2,10 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use odaw_core::{
-    ChannelLayout, EdgeId, Node, NodeId, NodeKind, NodeRole, ParamAddress, Port, PortDirection,
-    PortId, Project, ValidationError,
+    ChannelLayout, EdgeId, Node, NodeId, NodeKind, NodeRole, ParamAddress, ParamId, ParamValue,
+    Port, PortDirection, PortId, Project, ValidationError,
 };
-use odaw_dsp::{NodeRegistry, PassThrough, Silence};
+use odaw_dsp::{ChannelStrip, NodeRegistry, STRIP_GAIN_PARAM, STRIP_PAN_PARAM, Silence};
 use odaw_engine::{BufferId, CompiledProject, DeviceProcessor, ParamBuffer, PlanStep, RenderPlan};
 use thiserror::Error;
 
@@ -129,19 +129,6 @@ impl Compiler {
                 continue;
             }
 
-            if node.rack.is_empty() {
-                let unit = units.len();
-                units.push(Unit {
-                    node: *owner,
-                    event_target: None,
-                    processor: Some(Box::new(PassThrough::new())),
-                    dependencies: Vec::new(),
-                });
-                owner_output.insert(*owner, unit);
-                owner_input.insert(*owner, unit);
-                continue;
-            }
-
             let mut first_unit = None;
             let mut previous_unit = None;
             let mut first_has_input = false;
@@ -193,9 +180,20 @@ impl Compiler {
                 previous_unit = Some(unit_id);
             }
 
-            let last_unit = previous_unit.expect("a non-empty rack produces a unit");
-            owner_output.insert(*owner, last_unit);
-            if first_has_input {
+            // Every track, bus, folder, and the master ends in a channel strip.
+            // Keeping it in the plan (rather than as a document device) means
+            // gain and pan stay value-only parameters and never rebuild audio.
+            let strip_unit = units.len();
+            units.push(Unit {
+                node: *owner,
+                event_target: None,
+                processor: Some(Box::new(ChannelStrip::new(*owner))),
+                dependencies: previous_unit.into_iter().collect(),
+            });
+            owner_output.insert(*owner, strip_unit);
+            if node.rack.is_empty() {
+                owner_input.insert(*owner, strip_unit);
+            } else if first_has_input {
                 owner_input.insert(
                     *owner,
                     first_unit.expect("a non-empty rack has a first unit"),
@@ -290,6 +288,20 @@ impl Compiler {
                         param: param.clone(),
                     },
                     *value,
+                );
+            }
+        }
+        // Reserve channel-strip slots for every mixer owner so live fader
+        // gestures always have somewhere to land. Document values win because
+        // they were inserted first.
+        for owner in &owners {
+            for param in [STRIP_GAIN_PARAM, STRIP_PAN_PARAM] {
+                params.ensure(
+                    ParamAddress {
+                        node: *owner,
+                        param: ParamId::new(param),
+                    },
+                    ParamValue::Float(0.0),
                 );
             }
         }
@@ -521,7 +533,7 @@ mod tests {
         let compiled = compile(&demo::project()).unwrap();
         assert_eq!(compiled.plan.sample_rate, 48_000);
         assert_eq!(compiled.plan.channels, 2);
-        assert_eq!(compiled.plan.steps.len(), 3);
+        assert_eq!(compiled.plan.steps.len(), 4);
         assert_eq!(
             compiled
                 .plan
@@ -529,10 +541,10 @@ mod tests {
                 .iter()
                 .map(|step| step.node.raw())
                 .collect::<Vec<_>>(),
-            vec![2, 3, 4]
+            vec![2, 3, 1, 4]
         );
-        assert_eq!(compiled.plan.master, Some(2));
-        assert_eq!(compiled.params.len(), 2);
+        assert_eq!(compiled.plan.master, Some(3));
+        assert_eq!(compiled.params.len(), 6);
         assert_eq!(
             compiled.params.get(&ParamAddress {
                 node: NodeId::from_raw(2),
@@ -541,13 +553,41 @@ mod tests {
             Some(ParamValue::Float(0.25))
         );
         assert_eq!(
+            compiled.params.get(&ParamAddress {
+                node: NodeId::from_raw(1),
+                param: ParamId::new(STRIP_GAIN_PARAM),
+            }),
+            Some(ParamValue::Float(0.0))
+        );
+        assert_eq!(
             compiled
                 .plan
                 .steps
                 .iter()
                 .map(|step| step.event_target)
                 .collect::<Vec<_>>(),
-            vec![Some(NodeId::from_raw(1)), Some(NodeId::from_raw(1)), None]
+            vec![
+                Some(NodeId::from_raw(1)),
+                Some(NodeId::from_raw(1)),
+                None,
+                None
+            ]
+        );
+    }
+
+    #[test]
+    fn every_owner_gets_a_channel_strip() {
+        let compiled = compile(&demo::project()).unwrap();
+        let master = compiled.plan.master.unwrap();
+        let master_step = &compiled.plan.steps[master];
+        assert_eq!(master_step.node, NodeId::from_raw(4));
+        assert!(master_step.inputs.contains(&2));
+        assert_eq!(
+            compiled.params.get(&ParamAddress {
+                node: NodeId::from_raw(4),
+                param: ParamId::new(STRIP_PAN_PARAM),
+            }),
+            Some(ParamValue::Float(0.0))
         );
     }
 

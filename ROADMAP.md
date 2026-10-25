@@ -20,7 +20,6 @@ depend on the render-plan and parameter contracts.
 | M4 UI shell and track selection | 6 | Native window, transport, track headers, timeline. **Done.** |
 | M5 Piano roll | 6-7 | MIDI editing and sample-accurate playback. **Done; depth work remains.** |
 | M6 Automation | 7 | Draw, record, and render parameter automation. |
-| M6 Automation | 7 | Draw, record, and render parameter automation. |
 | M7 CLAP hosting | 8 | CLAP instruments and effects. |
 | M8 VST3 compatibility | 8b | VST3 behind the same device abstraction. |
 | M9 Release hardening | 9-11 | Scripting, performance, packaging. |
@@ -128,15 +127,18 @@ Acceptance: select one or more tracks, edit them through operators, undo, and se
 the UI and audio follow. Selection survives a reload only as an in-memory
 workspace preference, never in the project document.
 
-Implemented: native window, transport, Ableton-like timeline with track headers
-inside the arrangement, track colors, rename, mute/solo, add/delete track, add
-MIDI clip, clip move/resize/split/duplicate, grid zoom/snapping, MIDI and audio
-previews, drag/drop WAV/MP3 import with waveform previews, inspector, and
-realtime publish on structural edits.
+Implemented: native window, transport with editable tempo and bar/beat display,
+Ableton-like timeline with track headers inside the arrangement, track colors,
+rename, mute/solo, add/delete track, add MIDI clip, clip move/resize/split/
+duplicate, marquee multi-selection, grid zoom/snapping, MIDI and audio previews,
+drag/drop WAV/MP3 import with waveform previews, click/drag ruler seeking,
+split-at-cursor, per-track gain/pan faders, a stereo master out strip with
+faders, inspector, and realtime publish on structural edits. Scrubbing uses the
+realtime seek command and fader gestures commit one value-only command on
+release.
 
-Remaining: drag-to-reorder tracks, grouping/folders, arm, multi-select, mixer
-strips, parameter inspector, file dialogs, loop/seek transport, and audio-clip
-playback.
+Remaining: drag-to-reorder tracks, grouping/folders, arm, track multi-select,
+parameter automation UI, file dialogs, loop transport, and audio-clip playback.
 
 ## M5 — Piano roll
 
@@ -147,13 +149,13 @@ copy/paste tractable. Import/export remains a separate path through `AssetId`.
 Implemented: `Note` / `NoteId`, note add/remove/replace commands, note
 selection, the sample-accurate `Scheduler`, the `builtin.poly` instrument, and a
 collapsible/resizable piano roll with grid, snap, zoom, drag-to-create, move,
-resize, right-click menus, duplicate/velocity/length/transpose actions, undo,
-and redo.
+resize, Shift-drag marquee, right-click menus,
+duplicate/velocity/length/transpose actions, undo, and redo.
 
 Remaining:
 
 - velocity lane;
-- marquee selection and copy/paste;
+- copy/paste and duplicate ranges;
 - quantize and note preview;
 - playhead follow while playing;
 - MIDI recording and quantization depth in M7.
@@ -232,11 +234,11 @@ move ahead of CLAP, but the device interface must not fork.
 
 ## Immediate next steps after this commit
 
-1. Commit this tree as the UI-polish commit.
+1. Commit this tree as the transport/mixer commit.
 2. Add audio-clip playback so dragged WAV/MP3 clips are audible.
-3. Add arrangement/loop playback and transport seek.
-4. Add velocity lane, marquee selection, copy/paste, quantize, and playhead
-   follow to the piano roll.
+3. Add loop playback and a loop region editor.
+4. Add velocity lane, copy/paste, quantize, and playhead follow to the piano
+   roll.
 5. Add track grouping/folders and drag-to-reorder.
 6. Add automation editing.
 7. Add CLAP, then VST3.

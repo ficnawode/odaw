@@ -17,6 +17,14 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(compiled: CompiledProject, block_size: NonZeroUsize) -> Result<Self, EngineError> {
+        Self::new_at(compiled, block_size, 0)
+    }
+
+    pub fn new_at(
+        compiled: CompiledProject,
+        block_size: NonZeroUsize,
+        start_frame: u64,
+    ) -> Result<Self, EngineError> {
         let CompiledProject { plan, params } = compiled;
         if plan.sample_rate == 0 {
             return Err(EngineError::ZeroSampleRate);
@@ -76,7 +84,7 @@ impl Engine {
             buffers,
             scratch: vec![0.0; buffer_size],
             block_size: block_size.get(),
-            start_frame: 0,
+            start_frame,
         })
     }
 
@@ -94,6 +102,10 @@ impl Engine {
 
     pub fn start_frame(&self) -> u64 {
         self.start_frame
+    }
+
+    pub fn seek(&mut self, start_frame: u64) {
+        self.start_frame = start_frame;
     }
 
     pub fn params(&self) -> &ParamBuffer {
@@ -352,6 +364,26 @@ mod tests {
         engine.process_block(2, &[], &mut second).unwrap();
         assert_eq!(first, [0.0, 0.0, 1.0, 1.0]);
         assert_eq!(second, [2.0, 2.0, 3.0, 3.0]);
+    }
+
+    #[test]
+    fn engines_can_start_and_seek_at_an_arbitrary_frame() {
+        let mut engine = Engine::new_at(
+            compiled(
+                vec![step(NodeId::from_raw(1), vec![], 0, FrameIndex)],
+                Some(0),
+            ),
+            NonZeroUsize::new(2).unwrap(),
+            10,
+        )
+        .unwrap();
+        let mut output = [0.0; 4];
+        engine.process_block(2, &[], &mut output).unwrap();
+        assert_eq!(output, [10.0, 10.0, 11.0, 11.0]);
+
+        engine.seek(100);
+        engine.process_block(2, &[], &mut output).unwrap();
+        assert_eq!(output, [100.0, 100.0, 101.0, 101.0]);
     }
 
     #[test]

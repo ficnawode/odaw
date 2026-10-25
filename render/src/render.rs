@@ -118,6 +118,38 @@ mod tests {
     }
 
     #[test]
+    fn track_pan_and_gain_reach_the_channel_strip() {
+        use odaw_core::{NodeId, ParamId, ParamValue};
+
+        let mut project = demo::project();
+        let track = project
+            .nodes
+            .get_mut(&NodeId::from_raw(1))
+            .expect("demo has a lead track");
+        track
+            .params
+            .insert(ParamId::new("pan"), ParamValue::Float(1.0));
+        track
+            .params
+            .insert(ParamId::new("gain_db"), ParamValue::Float(-6.0));
+
+        let audio = render_project(&project, options(64, 10_000)).unwrap();
+        let energy = |skip: usize| -> f32 {
+            audio
+                .samples
+                .iter()
+                .skip(skip)
+                .step_by(2)
+                .map(|sample| sample.abs())
+                .sum()
+        };
+        let left = energy(0);
+        let right = energy(1);
+        assert_eq!(left, 0.0);
+        assert!(right > 0.0);
+    }
+
+    #[test]
     fn output_is_block_size_independent() {
         let first = render_project(&demo::project(), options(32, 1_500)).unwrap();
         let second = render_project(&demo::project(), options(64, 1_500)).unwrap();

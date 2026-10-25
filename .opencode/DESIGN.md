@@ -853,6 +853,18 @@ Resolved (items already stated in section 3 are not repeated):
 15. `[CONFIRMED]` Track presentation and mix flags (`name`, `color`, `muted`,
     `soloed`) live on `Node` and are serialized in format v3. The compiler
     silences muted tracks and, when any track is soloed, non-soloed tracks.
+16. `[CONFIRMED]` Every track, bus, folder, and the master ends in a built-in
+    channel strip in the compiled plan. Its `gain_db` and `pan` values are
+    ordinary value parameters on the owner node, so a fader preview writes the
+    live `ParamBuffer` and release commits one `ParamCommand`; the graph is not
+    rebuilt for a level change. The strip is plan-only and never a document
+    device, which keeps saved projects free of implicit devices.
+17. `[CONFIRMED]` The transport cursor is musical (`Tick`) UI state, not
+    document state. Seeking issues `RealtimeHandle::seek` during a scrub and
+    republishes a state at the cursor frame on release or play, so note
+    scheduling and oscillator phase restart cleanly without recompiling the
+    graph. The clip split/duplicate workflow is expressed as ordinary commands,
+    so `Ctrl+E` and context-menu splits are undoable.
 
 Still open:
 

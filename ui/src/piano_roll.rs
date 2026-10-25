@@ -70,6 +70,7 @@ pub struct PianoRollState {
     pub pixels_per_beat: f32,
     pub snap: Snap,
     drag: Option<DragState>,
+    marquee: Option<(Pos2, Pos2)>,
     active_clip: Option<ClipId>,
     context_note: Option<NoteId>,
     context_tick: Option<Tick>,
@@ -82,6 +83,7 @@ impl Default for PianoRollState {
             pixels_per_beat: 90.0,
             snap: Snap::Quarter,
             drag: None,
+            marquee: None,
             active_clip: None,
             context_note: None,
             context_tick: None,
@@ -93,6 +95,7 @@ impl Default for PianoRollState {
 impl PianoRollState {
     pub fn clear(&mut self) {
         self.drag = None;
+        self.marquee = None;
         self.active_clip = None;
         self.context_note = None;
         self.context_tick = None;
@@ -118,6 +121,7 @@ impl PianoRollState {
         if self.active_clip != Some(clip_id) {
             self.active_clip = Some(clip_id);
             self.drag = None;
+            self.marquee = None;
             self.context_note = None;
         }
 
@@ -178,6 +182,20 @@ impl PianoRollState {
                                 origin,
                                 px_per_tick,
                             );
+                            if let Some((start, end)) = self.marquee {
+                                let rect = Rect::from_two_pos(start, end);
+                                painter.rect_filled(
+                                    rect,
+                                    0.0,
+                                    Color32::from_rgba_unmultiplied(90, 160, 255, 28),
+                                );
+                                painter.rect_stroke(
+                                    rect,
+                                    0.0,
+                                    Stroke::new(1.0_f32, Color32::from_rgb(112, 178, 255)),
+                                    egui::StrokeKind::Inside,
+                                );
+                            }
                         });
                 });
             });
@@ -197,7 +215,7 @@ impl PianoRollState {
                     }
                 });
             ui.separator();
-            ui.label("Drag empty grid to create · drag notes to move · right edge resizes · right-click menu · pinch or Ctrl-scroll to zoom");
+            ui.label("Drag empty grid to create · drag notes to move · right edge resizes · Shift-drag selects notes · right-click menu · pinch or Ctrl-scroll to zoom");
         });
     }
 
@@ -267,6 +285,9 @@ impl PianoRollState {
                             mode,
                             start_pointer: position,
                         });
+                    } else if shift {
+                        self.drag = None;
+                        self.marquee = Some((position, position));
                     } else {
                         let tick = x_to_tick(position.x - origin.x, px_per_tick);
                         let max_start = (clip.length.raw() - 1).max(0);
@@ -328,9 +349,21 @@ impl PianoRollState {
                 };
                 self.drag = Some(DragState { preview, ..drag });
             }
+            if let (Some((start, _)), Some(position)) = (self.marquee, pointer) {
+                self.marquee = Some((start, position));
+            }
         }
 
         if primary_released {
+            if let Some((start, end)) = self.marquee.take() {
+                let rect = Rect::from_two_pos(start, end);
+                let ids: BTreeSet<NoteId> = notes
+                    .iter()
+                    .filter(|note| rect.intersects(note_rect(**note, origin, px_per_tick)))
+                    .map(|note| note.id)
+                    .collect();
+                editor.select_notes(ids, true);
+            }
             if let Some(drag) = self.drag.take() {
                 match drag.mode {
                     DragMode::Create => editor.add_note(
@@ -446,7 +479,7 @@ impl PianoRollState {
             }
         });
 
-        if primary_down && self.drag.is_some() {
+        if primary_down && (self.drag.is_some() || self.marquee.is_some()) {
             ui.ctx().request_repaint();
         }
     }

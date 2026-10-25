@@ -5,6 +5,7 @@ use eframe::egui::{self, Color32};
 use odaw_core::{Node, NodeId, NodeKind, PPQ, Tick};
 
 use crate::editor::{Editor, TRACK_COLORS};
+use crate::mixer::MixerState;
 use crate::piano_roll::{PianoRollState, note_name};
 use crate::timeline::{self, TimelineState};
 
@@ -12,8 +13,10 @@ pub struct OdawApp {
     editor: Editor,
     piano_roll: PianoRollState,
     piano_roll_open: bool,
+    mixer: MixerState,
     timeline: TimelineState,
     rename: Option<RenameState>,
+    tempo_edit: Option<f64>,
 }
 
 struct RenameState {
@@ -28,8 +31,10 @@ impl OdawApp {
             editor: Editor::new(path),
             piano_roll: PianoRollState::default(),
             piano_roll_open: true,
+            mixer: MixerState::default(),
             timeline: TimelineState::default(),
             rename: None,
+            tempo_edit: None,
         }
     }
 
@@ -45,6 +50,8 @@ impl OdawApp {
             input.modifiers.command && input.modifiers.shift && input.key_pressed(egui::Key::Z)
         });
         let save = ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::S));
+        let split = ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::E));
+        let home = ctx.input(|input| input.key_pressed(egui::Key::Home));
         let delete = ctx.input(|input| {
             input.key_pressed(egui::Key::Delete) || input.key_pressed(egui::Key::Backspace)
         });
@@ -56,28 +63,36 @@ impl OdawApp {
             self.editor.redo();
             self.piano_roll.clear();
             self.timeline.clear();
+            self.mixer.clear();
         } else if undo {
             self.editor.undo();
             self.piano_roll.clear();
             self.timeline.clear();
+            self.mixer.clear();
         }
         if save {
             self.editor.save();
         }
+        if split {
+            self.editor.split_selected_at_cursor();
+            self.timeline.clear();
+        }
+        if home {
+            self.editor.set_cursor(Tick::ZERO);
+        }
         if delete {
-            self.editor.delete_selected_notes();
+            if self.editor.session.selection().notes.is_empty() {
+                self.editor.delete_selected_clips();
+            } else {
+                self.editor.delete_selected_notes();
+            }
             self.piano_roll.clear();
+            self.timeline.clear();
         }
     }
 
     fn transport(&mut self, ui: &mut egui::Ui) {
         let project = self.editor.session.project().clone();
-        let bpm = project
-            .tempo
-            .points()
-            .next()
-            .map(|point| 60_000_000.0 / f64::from(point.micros_per_quarter))
-            .unwrap_or(120.0);
         let title = match &self.editor.path {
             Some(path) => format!("{} — {}", project.meta.name, path.display()),
             None => format!("{} (demo)", project.meta.name),
@@ -90,13 +105,47 @@ impl OdawApp {
             if ui.button(play_label).clicked() {
                 self.editor.toggle_play();
             }
+            if ui
+                .button("Start")
+                .on_hover_text("Move the cursor to bar 1")
+                .clicked()
+            {
+                self.editor.set_cursor(Tick::ZERO);
+            }
+            let tick = self.editor.playhead_tick();
+            let (bar, beat) = bars_beats(tick);
+            ui.monospace(format!("{bar}.{beat:.1}"));
             ui.label(format!(
                 "{:.2}s / {:.2}s",
                 self.editor.position_seconds(),
                 self.editor.duration_seconds()
             ));
             ui.separator();
-            ui.label(format!("{bpm:.1} BPM"));
+            ui.label("Tempo");
+            let mut bpm = self.tempo_edit.unwrap_or_else(|| self.editor.tempo_bpm());
+            let response = ui.add(
+                egui::DragValue::new(&mut bpm)
+                    .range(20.0..=999.0)
+                    .speed(0.1)
+                    .suffix(" BPM"),
+            );
+            if response.changed() {
+                self.tempo_edit = Some(bpm);
+            }
+            let enter = ui.input(|input| input.key_pressed(egui::Key::Enter));
+            let escape = ui.input(|input| input.key_pressed(egui::Key::Escape));
+            if escape {
+                self.tempo_edit = None;
+            } else if response.drag_stopped()
+                || response.lost_focus()
+                || (enter && self.tempo_edit.is_some())
+            {
+                if let Some(value) = self.tempo_edit.take() {
+                    self.editor.set_tempo_bpm(value);
+                    self.mixer.clear();
+                    self.piano_roll.clear();
+                }
+            }
             ui.label(format!("{} Hz", project.meta.sample_rate));
             ui.separator();
             if self.editor.audio_ready() {
@@ -165,14 +214,36 @@ impl OdawApp {
         ui.heading("Inspector");
         ui.separator();
 
-        let Some(track) = selected else {
-            ui.label("No track selected");
-            return;
-        };
-        let Some(node) = project.nodes.get(&track) else {
-            ui.label("The selected track no longer exists");
-            return;
-        };
+        match selected.and_then(|track| project.nodes.get(&track).map(|node| (track, node))) {
+            Some((track, node)) => {
+                self.track_inspector(ui, track, node);
+            }
+            None => {
+                ui.label("No track selected");
+            }
+        }
+
+        ui.separator();
+        self.master_inspector(ui, &project);
+
+        if let Some(note) = self.editor.selected_note() {
+            ui.separator();
+            ui.label("Selected note");
+            ui.label(format!(
+                "{} · velocity {} · start {:.2} beats · length {:.2} beats",
+                note_name(note.pitch),
+                note.velocity,
+                note.start.raw() as f32 / PPQ as f32,
+                note.length.raw() as f32 / PPQ as f32
+            ));
+            if ui.button("Delete note").clicked() {
+                self.editor.delete_selected_notes();
+                self.piano_roll.clear();
+            }
+        }
+    }
+
+    fn track_inspector(&mut self, ui: &mut egui::Ui, track: NodeId, node: &Node) {
         let name = track_name(node, track);
         ui.horizontal(|ui| {
             ui.colored_label(track_color(node, track), "■");
@@ -191,30 +262,65 @@ impl OdawApp {
                 self.piano_roll.clear();
             }
         });
+
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 3.0;
+            ui.label("Color");
+            let current = node.color.or_else(|| {
+                Some(
+                    TRACK_COLORS
+                        [(track.raw().saturating_sub(1) % TRACK_COLORS.len() as u64) as usize],
+                )
+            });
+            for color in TRACK_COLORS {
+                let selected = current == Some(color);
+                let button = egui::Button::new(if selected { "✓" } else { " " })
+                    .fill(rgb(color))
+                    .min_size(egui::vec2(18.0, 18.0));
+                if ui.add(button).clicked() {
+                    self.editor.set_track_color(track, Some(color));
+                }
+            }
+        });
+
+        ui.label("Mixer");
+        self.mixer.gain(ui, &mut self.editor, track, false);
+        self.mixer.pan(ui, &mut self.editor, track, false);
+
         ui.separator();
         ui.label("Devices");
         for device in &node.rack {
-            let kind = project
+            let kind = self
+                .editor
+                .session
+                .project()
                 .nodes
                 .get(device)
                 .and_then(|node| node.kind.as_ref())
                 .map_or("device", NodeKind::as_str);
             ui.small(format!("• {kind}"));
         }
+    }
 
-        if let Some(note) = self.editor.selected_note() {
-            ui.separator();
-            ui.label("Selected note");
-            ui.label(format!(
-                "{} · velocity {} · start {:.2} beats · length {:.2} beats",
-                note_name(note.pitch),
-                note.velocity,
-                note.start.raw() as f32 / PPQ as f32,
-                note.length.raw() as f32 / PPQ as f32
-            ));
-            if ui.button("Delete note").clicked() {
-                self.editor.delete_selected_notes();
-                self.piano_roll.clear();
+    fn master_inspector(&mut self, ui: &mut egui::Ui, project: &odaw_core::Project) {
+        ui.horizontal(|ui| {
+            ui.strong("Master out");
+            if let Some(master) = self.editor.master_node() {
+                let channels = project
+                    .nodes
+                    .get(&master)
+                    .and_then(|node| node.ports.iter().next())
+                    .map_or(2, |port| port.layout.channels());
+                ui.small(format!("{channels} ch"));
+            }
+        });
+        match self.editor.master_node() {
+            Some(master) => {
+                self.mixer.gain(ui, &mut self.editor, master, false);
+                self.mixer.pan(ui, &mut self.editor, master, false);
+            }
+            None => {
+                ui.small("This project has no master output. Add a track to create one.");
             }
         }
     }
@@ -333,6 +439,7 @@ impl eframe::App for OdawApp {
             timeline::show(
                 ui,
                 &mut self.editor,
+                &mut self.mixer,
                 &mut self.timeline,
                 &mut self.piano_roll.snap,
             );
@@ -396,6 +503,13 @@ fn track_name(node: &Node, id: NodeId) -> String {
     node.name
         .clone()
         .unwrap_or_else(|| format!("Track {}", id.raw()))
+}
+
+fn bars_beats(tick: Tick) -> (i64, f64) {
+    let bar_ticks = 4 * PPQ;
+    let bar = tick.raw().div_euclid(bar_ticks) + 1;
+    let beat = tick.raw().rem_euclid(bar_ticks) as f64 / PPQ as f64 + 1.0;
+    (bar, beat)
 }
 
 fn track_color(node: &Node, id: NodeId) -> Color32 {
