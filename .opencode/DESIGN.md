@@ -367,6 +367,10 @@ Node {
     role: NodeRole,                    // Track, Bus, Master, Send, Folder,
                                        // Input, Output, Modulator, Device
     kind: Option<NodeKind>,            // set when role is Device
+    name: Option<String>,              // display name, mostly for tracks
+    color: Option<u32>,                // 24-bit RGB, mostly for tracks
+    muted: bool,
+    soloed: bool,
     rack: PersistentVector<NodeId>,    // device node ids, serial order
     ports: PersistentVector<Port>,
     params: PersistentMap<ParamId, ParamValue>,
@@ -835,8 +839,8 @@ Resolved (items already stated in section 3 are not repeated):
 11. `[CONFIRMED]` The default `History` bound is 512 transactions. Asset bytes
     are bounded separately; see section 2.10.
 12. `[CONFIRMED]` MIDI notes are inline in the clip and carry `NoteId`s.
-    Project format v2 encodes them; v1 containers migrate with empty note
-    lists. See section 4.3.
+    Project format v3 encodes them together with track name, color, mute, and
+    solo metadata; v1 and v2 containers migrate with defaults. See section 4.3.
 13. `[CONFIRMED]` Realtime engine handoff uses bounded SPSC ring buffers of
     owned render state. The audio thread swaps at block boundaries and returns
     old state on a retirement queue; it never allocates, locks, or frees.
@@ -846,6 +850,9 @@ Resolved (items already stated in section 3 are not repeated):
     document state. Edits go through `Session` commands; selection stays in the
     control layer; structural edits recompile and republish a `RealtimeState`.
     The UI is replaceable by another client of the same command API.
+15. `[CONFIRMED]` Track presentation and mix flags (`name`, `color`, `muted`,
+    `soloed`) live on `Node` and are serialized in format v3. The compiler
+    silences muted tracks and, when any track is soloed, non-soloed tracks.
 
 Still open:
 

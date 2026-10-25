@@ -12,8 +12,12 @@ odaw-core = { path = "../core" }
 odaw-dsp = { path = "../dsp" }
 odaw-engine = { path = "../engine" }
 odaw-format = { path = "../format" }
+odaw-io = { path = "../io" }
 odaw-platform = { path = "../platform" }
 odaw-render = { path = "../render" }
+
+[dev-dependencies]
+tempfile = "3"
 
 [lints]
 workspace = true

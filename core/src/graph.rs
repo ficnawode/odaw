@@ -155,6 +155,10 @@ pub struct ModulationLink {
 pub struct Node {
     pub role: NodeRole,
     pub kind: Option<NodeKind>,
+    pub name: Option<String>,
+    pub color: Option<u32>,
+    pub muted: bool,
+    pub soloed: bool,
     pub rack: PersistentVector<NodeId>,
     pub ports: PersistentVector<Port>,
     pub params: PersistentMap<ParamId, ParamValue>,
@@ -169,6 +173,10 @@ impl Node {
         Self {
             role,
             kind: None,
+            name: None,
+            color: None,
+            muted: false,
+            soloed: false,
             rack: PersistentVector::new(),
             ports: PersistentVector::new(),
             params: PersistentMap::new(),
@@ -183,6 +191,26 @@ impl Node {
         let mut node = Self::new(NodeRole::Device);
         node.kind = Some(kind);
         node
+    }
+
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    pub fn with_color(mut self, color: u32) -> Self {
+        self.color = Some(color & 0x00ff_ffff);
+        self
+    }
+
+    pub fn muted(mut self, muted: bool) -> Self {
+        self.muted = muted;
+        self
+    }
+
+    pub fn soloed(mut self, soloed: bool) -> Self {
+        self.soloed = soloed;
+        self
     }
 
     pub fn with_ports(mut self, ports: impl IntoIterator<Item = Port>) -> Self {

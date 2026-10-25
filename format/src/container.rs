@@ -45,6 +45,13 @@ impl Container {
                     project: project.into(),
                 }
             }
+            2 => {
+                let project: crate::v2::ProjectDtoV2 = postcard::from_bytes(rest)?;
+                ProjectFile {
+                    format_version: FORMAT_VERSION,
+                    project: project.into(),
+                }
+            }
             FORMAT_VERSION => {
                 let project: crate::dto::ProjectDto = postcard::from_bytes(rest)?;
                 ProjectFile {
@@ -388,6 +395,9 @@ mod tests {
         project.nodes.insert(
             track,
             Node::new(NodeRole::Track)
+                .with_name("Lead")
+                .with_color(0x12_34_56)
+                .soloed(true)
                 .with_ports([Port::output(PortId::from_raw(0), ChannelLayout::Stereo)])
                 .with_rack([gain])
                 .with_param(ParamId::new("gain"), ParamValue::Float(0.8))

@@ -1,5 +1,5 @@
 use odaw_core::{
-    Clip, ClipContent, ClipId, Edge, EdgeId, NodeId, NodeRole, NoteId, ParamAddress, ParamId,
+    Clip, ClipContent, ClipId, Edge, EdgeId, Node, NodeId, NodeRole, NoteId, ParamAddress, ParamId,
     PersistentVector, PortDirection, PortId, SectionId, SectionRef, TempoMap,
 };
 use thiserror::Error;
@@ -65,14 +65,14 @@ fn dispatch_node(command: &NodeCommand, tx: &mut Tx) -> Result<(), DispatchError
             if tx.node(*node).is_some() {
                 return Err(DispatchError::NodeExists(*node));
             }
-            tx.insert_node(*node, value.clone());
+            tx.insert_node(*node, value.as_ref().clone());
         }
         NodeCommand::Remove { node } => remove_node_cascade(tx, *node)?,
         NodeCommand::Replace { node, value } => {
             if tx.node(*node).is_none() {
                 return Err(DispatchError::MissingNode(*node));
             }
-            tx.insert_node(*node, value.clone());
+            tx.insert_node(*node, value.as_ref().clone());
             tx.mark_layout_or_latency();
         }
         NodeCommand::SetRack { node, rack } => {
@@ -94,7 +94,32 @@ fn dispatch_node(command: &NodeCommand, tx: &mut Tx) -> Result<(), DispatchError
             tx.insert_node(*node, value);
             tx.mark_layout_or_latency();
         }
+        NodeCommand::SetName { node, name } => {
+            update_node(tx, *node, |value| value.name = name.clone())?;
+        }
+        NodeCommand::SetColor { node, color } => {
+            update_node(tx, *node, |value| value.color = *color)?;
+        }
+        NodeCommand::SetMuted { node, muted } => {
+            update_node(tx, *node, |value| value.muted = *muted)?;
+        }
+        NodeCommand::SetSoloed { node, soloed } => {
+            update_node(tx, *node, |value| value.soloed = *soloed)?;
+        }
     }
+    Ok(())
+}
+
+fn update_node(
+    tx: &mut Tx,
+    node: NodeId,
+    update: impl FnOnce(&mut Node),
+) -> Result<(), DispatchError> {
+    let Some(mut value) = tx.node(node).cloned() else {
+        return Err(DispatchError::MissingNode(node));
+    };
+    update(&mut value);
+    tx.insert_node(node, value);
     Ok(())
 }
 
@@ -679,7 +704,7 @@ mod tests {
         run(
             Command::new(CommandKind::Node(NodeCommand::Add {
                 node: NodeId::from_raw(1),
-                value: Node::new(NodeRole::Track),
+                value: Box::new(Node::new(NodeRole::Track)),
             })),
             &mut tx,
         )

@@ -17,8 +17,8 @@ depend on the render-plan and parameter contracts.
 | M1 Control core | 1 | Commands, transactions, undo, operators, selection. **Done.** |
 | M2 First sound | 2-3 | Deterministic offline WAV and realtime playback. **Done.** |
 | M3 Arrangement and headless product | 4-5 | Sections, loops, usable CLI. |
-| M4 UI shell and track selection | 6 | Native window, transport, track list, timeline. **Basic UI done.** |
-| M5 Piano roll | 6-7 | MIDI editing and sample-accurate playback. **Basic editor done.** |
+| M4 UI shell and track selection | 6 | Native window, transport, track headers, timeline. **Done.** |
+| M5 Piano roll | 6-7 | MIDI editing and sample-accurate playback. **Done; depth work remains.** |
 | M6 Automation | 7 | Draw, record, and render parameter automation. |
 | M6 Automation | 7 | Draw, record, and render parameter automation. |
 | M7 CLAP hosting | 8 | CLAP instruments and effects. |
@@ -128,13 +128,15 @@ Acceptance: select one or more tracks, edit them through operators, undo, and se
 the UI and audio follow. Selection survives a reload only as an in-memory
 workspace preference, never in the project document.
 
-Implemented: native window, transport with play/stop and position, track list,
-track selection, add track with a poly instrument and MIDI clip, timeline with
-clip selection and playhead, inspector for the selected note, and realtime
-publish on structural edits.
+Implemented: native window, transport, Ableton-like timeline with track headers
+inside the arrangement, track colors, rename, mute/solo, add/delete track, add
+MIDI clip, clip move/resize/split/duplicate, grid zoom/snapping, MIDI and audio
+previews, drag/drop WAV/MP3 import with waveform previews, inspector, and
+realtime publish on structural edits.
 
-Remaining: rename/delete/reorder, mute/solo/arm, multi-select, mixer strips,
-parameter inspector, file dialogs, loop/seek transport.
+Remaining: drag-to-reorder tracks, grouping/folders, arm, multi-select, mixer
+strips, parameter inspector, file dialogs, loop/seek transport, and audio-clip
+playback.
 
 ## M5 — Piano roll
 
@@ -144,12 +146,14 @@ copy/paste tractable. Import/export remains a separate path through `AssetId`.
 
 Implemented: `Note` / `NoteId`, note add/remove/replace commands, note
 selection, the sample-accurate `Scheduler`, the `builtin.poly` instrument, and a
-piano roll with grid, snap, zoom, draw, move, resize, delete, undo, and redo.
+collapsible/resizable piano roll with grid, snap, zoom, drag-to-create, move,
+resize, right-click menus, duplicate/velocity/length/transpose actions, undo,
+and redo.
 
 Remaining:
 
-- velocity lane and numeric velocity editing;
-- marquee selection, copy/paste/duplicate, transpose;
+- velocity lane;
+- marquee selection and copy/paste;
 - quantize and note preview;
 - playhead follow while playing;
 - MIDI recording and quantization depth in M7.
@@ -228,12 +232,13 @@ move ahead of CLAP, but the device interface must not fork.
 
 ## Immediate next steps after this commit
 
-1. Commit this tree as the UI/piano-roll commit.
-2. Add arrangement/loop playback and transport seek.
-3. Add velocity lane, marquee selection, copy/paste, quantize, and playhead
+1. Commit this tree as the UI-polish commit.
+2. Add audio-clip playback so dragged WAV/MP3 clips are audible.
+3. Add arrangement/loop playback and transport seek.
+4. Add velocity lane, marquee selection, copy/paste, quantize, and playhead
    follow to the piano roll.
-4. Add automation editing.
-5. Add the versioned command-log DTOs and operation log.
-6. Add CLAP, then VST3.
-7. Add latency compensation, the master rate bridge, and support for
+5. Add track grouping/folders and drag-to-reorder.
+6. Add automation editing.
+7. Add CLAP, then VST3.
+8. Add latency compensation, the master rate bridge, and support for
    parallel/sidechain device paths.

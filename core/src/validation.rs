@@ -21,6 +21,10 @@ pub enum ValidationError {
     MissingDeviceKind(NodeId),
     #[error("non-device node {0} declares a device kind")]
     UnexpectedDeviceKind(NodeId),
+    #[error("node {0} has an empty name")]
+    EmptyNodeName(NodeId),
+    #[error("node {node} has color {color:#08x}, outside 24-bit RGB")]
+    InvalidNodeColor { node: NodeId, color: u32 },
     #[error("node {node} holds a rack entry {entry} that is not a device node")]
     RackEntryNotDevice { node: NodeId, entry: NodeId },
     #[error("node {node} references missing rack entry {entry}")]
@@ -140,6 +144,21 @@ impl Project {
             }
             if node.role != NodeRole::Device && node.kind.is_some() {
                 return Err(ValidationError::UnexpectedDeviceKind(*node_id));
+            }
+            if node
+                .name
+                .as_deref()
+                .is_some_and(|name| name.trim().is_empty())
+            {
+                return Err(ValidationError::EmptyNodeName(*node_id));
+            }
+            if let Some(color) = node.color {
+                if color > 0x00ff_ffff {
+                    return Err(ValidationError::InvalidNodeColor {
+                        node: *node_id,
+                        color,
+                    });
+                }
             }
             if !node.role.holds_rack() && !node.rack.is_empty() {
                 return Err(ValidationError::RackOnWrongRole { node: *node_id });
@@ -604,6 +623,28 @@ mod tests {
                 note: NoteId::from_raw(1),
             })
         );
+    }
+
+    #[test]
+    fn node_name_and_color_are_validated() {
+        let mut project = track_and_master();
+        let track = NodeId::from_raw(1);
+        project.nodes.get_mut(&track).unwrap().name = Some("  ".into());
+        assert_eq!(
+            project.validate(),
+            Err(ValidationError::EmptyNodeName(track))
+        );
+        project.nodes.get_mut(&track).unwrap().name = Some("Lead".into());
+        project.nodes.get_mut(&track).unwrap().color = Some(0x0100_0000);
+        assert_eq!(
+            project.validate(),
+            Err(ValidationError::InvalidNodeColor {
+                node: track,
+                color: 0x0100_0000,
+            })
+        );
+        project.nodes.get_mut(&track).unwrap().color = Some(0x00ff_ffff);
+        assert_eq!(project.validate(), Ok(()));
     }
 
     #[test]

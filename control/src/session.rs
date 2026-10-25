@@ -322,7 +322,7 @@ mod tests {
     fn add_track(node: NodeId) -> Command {
         Command::new(CommandKind::Node(NodeCommand::Add {
             node,
-            value: Node::new(NodeRole::Track),
+            value: Box::new(Node::new(NodeRole::Track)),
         }))
     }
 
@@ -407,7 +407,7 @@ mod tests {
         let mut session = Session::new(empty_project()).unwrap();
         let result = session.apply_command(Command::new(CommandKind::Node(NodeCommand::Add {
             node: NodeId::from_raw(1),
-            value: Node::new(NodeRole::Device),
+            value: Box::new(Node::new(NodeRole::Device)),
         })));
 
         assert!(matches!(result, Err(SessionError::Validation(_))));

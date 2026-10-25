@@ -20,7 +20,7 @@ pub enum Snap {
 }
 
 impl Snap {
-    const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 5] = [
         Self::Whole,
         Self::Half,
         Self::Quarter,
@@ -28,7 +28,7 @@ impl Snap {
         Self::Sixteenth,
     ];
 
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Whole => "1/1",
             Self::Half => "1/2",
@@ -49,8 +49,9 @@ impl Snap {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DragMode {
+    Create,
     Move,
     Resize,
 }
@@ -58,7 +59,7 @@ enum DragMode {
 #[derive(Clone, Copy, Debug)]
 struct DragState {
     clip: ClipId,
-    original: Note,
+    original: Option<Note>,
     preview: Note,
     mode: DragMode,
     start_pointer: Pos2,
@@ -70,6 +71,9 @@ pub struct PianoRollState {
     pub snap: Snap,
     drag: Option<DragState>,
     active_clip: Option<ClipId>,
+    context_note: Option<NoteId>,
+    context_tick: Option<Tick>,
+    context_pitch: Option<u8>,
 }
 
 impl Default for PianoRollState {
@@ -79,6 +83,9 @@ impl Default for PianoRollState {
             snap: Snap::Quarter,
             drag: None,
             active_clip: None,
+            context_note: None,
+            context_tick: None,
+            context_pitch: None,
         }
     }
 }
@@ -87,6 +94,9 @@ impl PianoRollState {
     pub fn clear(&mut self) {
         self.drag = None;
         self.active_clip = None;
+        self.context_note = None;
+        self.context_tick = None;
+        self.context_pitch = None;
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui, editor: &mut Editor) {
@@ -108,6 +118,7 @@ impl PianoRollState {
         if self.active_clip != Some(clip_id) {
             self.active_clip = Some(clip_id);
             self.drag = None;
+            self.context_note = None;
         }
 
         let notes: Vec<Note> = editor.notes(clip_id);
@@ -117,54 +128,65 @@ impl PianoRollState {
         let viewport_width = (ui.available_width() - KEY_WIDTH - 12.0).max(240.0);
         let grid_width = (clip.length.raw().max(1) as f32 * px_per_tick).max(viewport_width);
 
-        ui.horizontal_top(|ui| {
-            let (key_response, key_painter) =
-                ui.allocate_painter(vec2(KEY_WIDTH, height), Sense::hover());
-            draw_keyboard(&key_painter, key_response.rect.min, height);
+        egui::ScrollArea::vertical()
+            .id_salt("piano_roll_vertical")
+            .show(ui, |ui| {
+                ui.horizontal_top(|ui| {
+                    let (key_response, key_painter) =
+                        ui.allocate_painter(vec2(KEY_WIDTH, height), Sense::hover());
+                    draw_keyboard(&key_painter, key_response.rect.min, height);
 
-            egui::ScrollArea::horizontal()
-                .id_salt("piano_roll_grid")
-                .show(ui, |ui| {
-                    let (response, painter) =
-                        ui.allocate_painter(vec2(grid_width, height), Sense::click_and_drag());
-                    let origin = response.rect.min;
-                    draw_grid(
-                        &painter,
-                        origin,
-                        grid_width,
-                        height,
-                        clip.length,
-                        self.pixels_per_beat,
-                    );
-                    draw_notes(
-                        &painter,
-                        origin,
-                        grid_width,
-                        &notes,
-                        &selected,
-                        self.drag.map(|drag| drag.preview),
-                        px_per_tick,
-                    );
-                    self.interact(
-                        ui,
-                        editor,
-                        &response,
-                        clip_id,
-                        &clip,
-                        &notes,
-                        origin,
-                        px_per_tick,
-                    );
+                    egui::ScrollArea::horizontal()
+                        .id_salt("piano_roll_grid")
+                        .show(ui, |ui| {
+                            let (response, painter) = ui.allocate_painter(
+                                vec2(grid_width, height),
+                                Sense::click_and_drag(),
+                            );
+                            let origin = response.rect.min;
+                            draw_grid(
+                                &painter,
+                                origin,
+                                grid_width,
+                                height,
+                                clip.length,
+                                self.pixels_per_beat,
+                            );
+                            let hovered = ui
+                                .input(|input| input.pointer.hover_pos())
+                                .and_then(|position| {
+                                    hit_note(&notes, position, origin, px_per_tick)
+                                })
+                                .map(|note| note.id);
+                            draw_notes(
+                                &painter,
+                                origin,
+                                grid_width,
+                                &notes,
+                                &selected,
+                                self.drag.map(|drag| drag.preview),
+                                hovered,
+                                px_per_tick,
+                            );
+                            self.interact(
+                                ui,
+                                editor,
+                                &response,
+                                clip_id,
+                                &clip,
+                                &notes,
+                                origin,
+                                px_per_tick,
+                            );
+                        });
                 });
-        });
+            });
     }
 
     fn controls(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.label("Piano roll");
-            ui.separator();
             ui.label("Zoom");
-            ui.add(egui::Slider::new(&mut self.pixels_per_beat, 30.0..=220.0).show_value(false));
+            ui.add(egui::Slider::new(&mut self.pixels_per_beat, 30.0..=500.0).show_value(false));
             ui.separator();
             ui.label("Snap");
             egui::ComboBox::from_id_salt("piano_roll_snap")
@@ -175,7 +197,7 @@ impl PianoRollState {
                     }
                 });
             ui.separator();
-            ui.label("Drag notes, drag the right edge to resize, right-click to delete.");
+            ui.label("Drag empty grid to create · drag notes to move · right edge resizes · right-click menu · pinch or Ctrl-scroll to zoom");
         });
     }
 
@@ -202,8 +224,30 @@ impl PianoRollState {
         let primary_pressed = ui.input(|input| input.pointer.primary_pressed());
         let primary_down = ui.input(|input| input.pointer.primary_down());
         let primary_released = ui.input(|input| input.pointer.primary_released());
-        let secondary_clicked = ui.input(|input| input.pointer.secondary_clicked());
+        let secondary_pressed = ui.input(|input| input.pointer.secondary_pressed());
         let shift = ui.input(|input| input.modifiers.shift);
+
+        if response.hovered() {
+            let zoom = ui.input(|input| input.zoom_delta());
+            let ctrl_scroll = ui.input(|input| {
+                if input.modifiers.command {
+                    input.raw_scroll_delta.y
+                } else {
+                    0.0
+                }
+            });
+            let factor = if (zoom - 1.0).abs() > 0.001 {
+                zoom
+            } else if ctrl_scroll.abs() > 0.0 {
+                (ctrl_scroll * 0.01).exp()
+            } else {
+                1.0
+            };
+            if (factor - 1.0).abs() > 0.001 {
+                self.pixels_per_beat = (self.pixels_per_beat * factor).clamp(30.0, 500.0);
+                ui.ctx().request_repaint();
+            }
+        }
 
         if primary_pressed && response.hovered() {
             if let Some(position) = pointer {
@@ -218,7 +262,7 @@ impl PianoRollState {
                         editor.select_note(note.id, shift);
                         self.drag = Some(DragState {
                             clip: clip_id,
-                            original: note,
+                            original: Some(note),
                             preview: note,
                             mode,
                             start_pointer: position,
@@ -233,13 +277,20 @@ impl PianoRollState {
                             .ticks()
                             .min((clip.length.raw() - start).max(1))
                             .max(1);
-                        editor.add_note(
-                            clip_id,
-                            pitch,
-                            Tick::from_raw(start),
-                            Tick::from_raw(length),
-                            100,
-                        );
+                        self.drag = Some(DragState {
+                            clip: clip_id,
+                            original: None,
+                            preview: Note {
+                                id: NoteId::from_raw(0),
+                                pitch,
+                                start: Tick::from_raw(start),
+                                length: Tick::from_raw(length),
+                                velocity: 100,
+                                channel: 0,
+                            },
+                            mode: DragMode::Create,
+                            start_pointer: position,
+                        });
                     }
                 }
             }
@@ -252,16 +303,28 @@ impl PianoRollState {
                 let delta_pitch =
                     -((position.y - drag.start_pointer.y) / ROW_HEIGHT).round() as i32;
                 let preview = match drag.mode {
+                    DragMode::Create => {
+                        let length = snap_tick(delta_ticks, self.snap)
+                            .max(self.snap.ticks())
+                            .min((clip.length.raw() - drag.preview.start.raw()).max(1));
+                        Note {
+                            length: Tick::from_raw(length),
+                            ..drag.preview
+                        }
+                    }
                     DragMode::Move => moved_note(
-                        drag.original,
+                        drag.original.expect("move drags have an original note"),
                         delta_ticks,
                         delta_pitch,
                         clip.length,
                         self.snap,
                     ),
-                    DragMode::Resize => {
-                        resized_note(drag.original, delta_ticks, clip.length, self.snap)
-                    }
+                    DragMode::Resize => resized_note(
+                        drag.original.expect("resize drags have an original note"),
+                        delta_ticks,
+                        clip.length,
+                        self.snap,
+                    ),
                 };
                 self.drag = Some(DragState { preview, ..drag });
             }
@@ -269,19 +332,119 @@ impl PianoRollState {
 
         if primary_released {
             if let Some(drag) = self.drag.take() {
-                if drag.preview != drag.original {
-                    editor.replace_note(drag.clip, drag.preview);
+                match drag.mode {
+                    DragMode::Create => editor.add_note(
+                        drag.clip,
+                        drag.preview.pitch,
+                        drag.preview.start,
+                        drag.preview.length,
+                        drag.preview.velocity,
+                    ),
+                    DragMode::Move | DragMode::Resize => {
+                        if let Some(original) = drag.original {
+                            if drag.preview != original {
+                                editor.replace_note(drag.clip, drag.preview);
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        if secondary_clicked && response.hovered() {
+        if secondary_pressed && response.hovered() {
             if let Some(position) = pointer {
                 if let Some(note) = hit_note(notes, position, origin, px_per_tick) {
-                    editor.remove_note(clip_id, note.id);
+                    editor.select_note(note.id, shift);
+                    self.context_note = Some(note.id);
+                    self.context_tick = Some(note.start);
+                    self.context_pitch = Some(note.pitch);
+                } else if grid.contains(position) {
+                    self.context_note = None;
+                    self.context_tick = Some(Tick::from_raw(x_to_tick(
+                        position.x - origin.x,
+                        px_per_tick,
+                    )));
+                    self.context_pitch = Some(y_to_pitch(position.y - origin.y));
+                } else {
+                    self.context_note = None;
+                    self.context_tick = None;
+                    self.context_pitch = None;
                 }
             }
         }
+
+        let context_note = self.context_note;
+        let context_tick = self.context_tick;
+        let context_pitch = self.context_pitch;
+        let snap = self.snap;
+        response.context_menu(|ui| {
+            if let Some(note_id) = context_note {
+                if ui.button("Duplicate note").clicked() {
+                    editor.duplicate_note(clip_id, note_id);
+                    ui.close();
+                }
+                if ui.button("Delete note").clicked() {
+                    editor.remove_note(clip_id, note_id);
+                    ui.close();
+                }
+                ui.menu_button("Velocity", |ui| {
+                    for velocity in [32, 64, 96, 127] {
+                        if ui.button(velocity.to_string()).clicked() {
+                            editor.set_note_velocity(clip_id, note_id, velocity);
+                            ui.close();
+                        }
+                    }
+                });
+                ui.menu_button("Length", |ui| {
+                    for (label, ticks) in [
+                        ("1/16", PPQ / 4),
+                        ("1/8", PPQ / 2),
+                        ("1/4", PPQ),
+                        ("1/2", PPQ * 2),
+                        ("1 bar", PPQ * 4),
+                    ] {
+                        if ui.button(label).clicked() {
+                            editor.set_note_length(clip_id, note_id, Tick::from_raw(ticks));
+                            ui.close();
+                        }
+                    }
+                });
+                ui.menu_button("Transpose", |ui| {
+                    if ui.button("+12").clicked() {
+                        editor.transpose_note(clip_id, note_id, 12);
+                        ui.close();
+                    }
+                    if ui.button("-12").clicked() {
+                        editor.transpose_note(clip_id, note_id, -12);
+                        ui.close();
+                    }
+                });
+            } else {
+                if let (Some(tick), Some(pitch)) = (context_tick, context_pitch) {
+                    if ui.button("Add note here").clicked() {
+                        let start = snap_tick(tick.raw(), snap).clamp(0, clip.length.raw() - 1);
+                        let length = snap.ticks().min((clip.length.raw() - start).max(1)).max(1);
+                        editor.add_note(
+                            clip_id,
+                            pitch,
+                            Tick::from_raw(start),
+                            Tick::from_raw(length),
+                            100,
+                        );
+                        ui.close();
+                    }
+                    ui.separator();
+                }
+                if ui.button("Select all notes").clicked() {
+                    editor.select_all_notes(clip_id);
+                    ui.close();
+                }
+                if ui.button("Clear selection").clicked() {
+                    editor.clear_selection();
+                    ui.close();
+                }
+            }
+        });
 
         if primary_down && self.drag.is_some() {
             ui.ctx().request_repaint();
@@ -376,6 +539,7 @@ fn draw_grid(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_notes(
     painter: &egui::Painter,
     origin: Pos2,
@@ -383,16 +547,21 @@ fn draw_notes(
     notes: &[Note],
     selected: &BTreeSet<NoteId>,
     preview: Option<Note>,
+    hovered: Option<NoteId>,
     px_per_tick: f32,
 ) {
     let grid = Rect::from_min_size(
         origin,
         vec2(width, f32::from(PITCH_HIGH - PITCH_LOW + 1) * ROW_HEIGHT),
     );
+    let mut preview_drawn = false;
     for note in notes {
         let note = preview
             .filter(|preview| preview.id == note.id)
             .unwrap_or(*note);
+        if preview.is_some_and(|preview| preview.id == note.id) {
+            preview_drawn = true;
+        }
         if note.pitch < PITCH_LOW || note.pitch > PITCH_HIGH {
             continue;
         }
@@ -406,20 +575,42 @@ fn draw_notes(
         } else {
             Color32::from_rgb(64, 132, 214)
         };
-        painter.rect_filled(rect, 3.0, color);
-        painter.line_segment(
-            [rect.left_top(), rect.left_bottom()],
-            Stroke::new(1.0_f32, Color32::from_rgb(230, 236, 245)),
-        );
-        if rect.width() > 30.0 {
-            painter.text(
-                pos2(rect.min.x + 4.0, rect.center().y),
-                Align2::LEFT_CENTER,
-                note_name(note.pitch),
-                FontId::monospace(8.0),
-                Color32::from_rgb(20, 22, 26),
+        draw_note(painter, rect, note.pitch, color, Some(note.id) == hovered);
+    }
+    if let Some(preview) = preview {
+        if !preview_drawn && preview.pitch >= PITCH_LOW && preview.pitch <= PITCH_HIGH {
+            let rect = note_rect(preview, origin, px_per_tick);
+            draw_note(
+                painter,
+                rect,
+                preview.pitch,
+                Color32::from_rgb(83, 184, 139),
+                true,
             );
         }
+    }
+}
+
+fn draw_note(painter: &egui::Painter, rect: Rect, pitch: u8, color: Color32, hovered: bool) {
+    painter.rect_filled(rect, 3.0, color);
+    painter.line_segment(
+        [rect.left_top(), rect.left_bottom()],
+        Stroke::new(1.0_f32, Color32::from_rgb(230, 236, 245)),
+    );
+    if hovered {
+        painter.line_segment(
+            [rect.right_top(), rect.right_bottom()],
+            Stroke::new(1.5_f32, Color32::from_rgb(255, 255, 255)),
+        );
+    }
+    if rect.width() > 30.0 {
+        painter.text(
+            pos2(rect.min.x + 4.0, rect.center().y),
+            Align2::LEFT_CENTER,
+            note_name(pitch),
+            FontId::monospace(8.0),
+            Color32::from_rgb(20, 22, 26),
+        );
     }
 }
 
@@ -469,7 +660,7 @@ fn x_to_tick(x: f32, px_per_tick: f32) -> i64 {
     (x / px_per_tick).round() as i64
 }
 
-fn snap_tick(tick: i64, snap: Snap) -> i64 {
+pub(crate) fn snap_tick(tick: i64, snap: Snap) -> i64 {
     let step = snap.ticks();
     ((tick as f64 / step as f64).round() as i64) * step
 }

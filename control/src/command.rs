@@ -93,11 +93,15 @@ pub enum AssetCommand {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum NodeCommand {
-    Add { node: NodeId, value: Node },
+    Add { node: NodeId, value: Box<Node> },
     Remove { node: NodeId },
-    Replace { node: NodeId, value: Node },
+    Replace { node: NodeId, value: Box<Node> },
     SetRack { node: NodeId, rack: Vec<NodeId> },
     SetPorts { node: NodeId, ports: Vec<Port> },
+    SetName { node: NodeId, name: Option<String> },
+    SetColor { node: NodeId, color: Option<u32> },
+    SetMuted { node: NodeId, muted: bool },
+    SetSoloed { node: NodeId, soloed: bool },
 }
 
 #[derive(Clone, Debug, PartialEq)]

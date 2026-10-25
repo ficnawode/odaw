@@ -5,7 +5,7 @@ use odaw_core::{
     ChannelLayout, EdgeId, Node, NodeId, NodeKind, NodeRole, ParamAddress, Port, PortDirection,
     PortId, Project, ValidationError,
 };
-use odaw_dsp::{NodeRegistry, PassThrough};
+use odaw_dsp::{NodeRegistry, PassThrough, Silence};
 use odaw_engine::{BufferId, CompiledProject, DeviceProcessor, ParamBuffer, PlanStep, RenderPlan};
 use thiserror::Error;
 
@@ -70,6 +70,10 @@ impl Compiler {
             }
         }
 
+        let any_solo = project
+            .nodes
+            .values()
+            .any(|node| node.role == NodeRole::Track && node.soloed);
         let mut owners = Vec::new();
         let mut rack_owner = BTreeMap::new();
         for (node_id, node) in &project.nodes {
@@ -109,6 +113,21 @@ impl Compiler {
                 .nodes
                 .get(owner)
                 .ok_or(CompileError::MissingNode(*owner))?;
+
+            let silenced =
+                node.role == NodeRole::Track && (node.muted || (any_solo && !node.soloed));
+            if silenced {
+                let unit = units.len();
+                units.push(Unit {
+                    node: *owner,
+                    event_target: None,
+                    processor: Some(Box::new(Silence::new())),
+                    dependencies: Vec::new(),
+                });
+                owner_output.insert(*owner, unit);
+                owner_input.insert(*owner, unit);
+                continue;
+            }
 
             if node.rack.is_empty() {
                 let unit = units.len();

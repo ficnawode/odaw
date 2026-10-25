@@ -90,6 +90,10 @@ pub struct NodeDto {
     pub modulations: BTreeMap<String, Vec<ModulationLinkDto>>,
     pub clips: Vec<u64>,
     pub state: Option<Vec<u8>>,
+    pub name: Option<String>,
+    pub color: Option<u32>,
+    pub muted: bool,
+    pub soloed: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -509,6 +513,10 @@ impl From<&Node> for NodeDto {
                 .collect(),
             clips: node.clips.iter().map(|id| id.raw()).collect(),
             state: node.state.as_ref().map(|state| state.to_vec()),
+            name: node.name.clone(),
+            color: node.color,
+            muted: node.muted,
+            soloed: node.soloed,
         }
     }
 }
@@ -518,6 +526,10 @@ impl From<NodeDto> for Node {
         Self {
             role: NodeRole::from(dto.role),
             kind: dto.kind.map(NodeKind::from),
+            name: dto.name,
+            color: dto.color,
+            muted: dto.muted,
+            soloed: dto.soloed,
             rack: dto.rack.into_iter().map(NodeId::from_raw).collect(),
             ports: dto.ports.into_iter().map(Port::from).collect(),
             params: dto

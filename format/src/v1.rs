@@ -3,9 +3,10 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::dto::{
-    AssetDto, ClipContentDto, ClipDto, EdgeDto, LoopRegionDto, MarkerDto, MetaDto, NodeDto,
-    ProjectDto, SectionDto, SectionRefDto, TempoMapDto, TimeSignatureDto,
+    AssetDto, ClipContentDto, ClipDto, EdgeDto, LoopRegionDto, MarkerDto, MetaDto, ProjectDto,
+    SectionDto, SectionRefDto, TempoMapDto, TimeSignatureDto,
 };
+use crate::v2::NodeDtoV2;
 
 #[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -23,7 +24,7 @@ pub struct ProjectDtoV1 {
     pub sections: BTreeMap<u64, SectionDto>,
     pub arrangement: Vec<SectionRefDto>,
     pub loops: Vec<LoopRegionDto>,
-    pub nodes: BTreeMap<u64, NodeDto>,
+    pub nodes: BTreeMap<u64, NodeDtoV2>,
     pub edges: BTreeMap<u64, EdgeDto>,
     pub clips: BTreeMap<u64, ClipDtoV1>,
     pub assets: BTreeMap<String, AssetDto>,
@@ -71,7 +72,11 @@ impl From<ProjectDtoV1> for ProjectDto {
             sections: project.sections,
             arrangement: project.arrangement,
             loops: project.loops,
-            nodes: project.nodes,
+            nodes: project
+                .nodes
+                .into_iter()
+                .map(|(id, node)| (id, node.into()))
+                .collect(),
             edges: project.edges,
             clips: project
                 .clips
@@ -117,8 +122,7 @@ impl From<ClipDtoV1> for ClipDto {
 mod tests {
     use super::*;
     use crate::dto::{
-        ChannelLayoutDto, NodeDto, NodeRoleDto, PortDirectionDto, PortDto, TempoPointDto,
-        TimeSignatureDto,
+        ChannelLayoutDto, NodeRoleDto, PortDirectionDto, PortDto, TempoPointDto, TimeSignatureDto,
     };
 
     fn empty_project() -> ProjectDtoV1 {
@@ -167,7 +171,7 @@ mod tests {
         let mut project = empty_project();
         project.nodes.insert(
             1,
-            NodeDto {
+            NodeDtoV2 {
                 role: NodeRoleDto::Track,
                 kind: None,
                 rack: Vec::new(),

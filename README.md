@@ -18,6 +18,10 @@ This is the **first usable app shell**: the project compiles into a render plan,
 schedules sample-accurate notes, renders deterministic audio offline, plays
 through the sound card, and can be edited in a native track/piano-roll UI.
 
+The UI is deliberately Ableton-like: tracks live in the timeline header, the
+arrangement is the large central view, and the piano roll is a collapsible,
+vertically resizable panel below it.
+
 ![odaw UI](docs/odaw-ui.png)
 
 What works today:
@@ -39,20 +43,24 @@ What works today:
 - `odaw-render`: deterministic offline rendering.
 - `odaw-io`: a 16-bit PCM WAV writer.
 - `odaw-platform`: `cpal` output with f32/i16/u16 conversion.
-- `odaw-format`: versioned DTOs, postcard payloads, JSON manifests, and v1 → v2
-  migration.
-- `odaw-ui` / `odaw-app`: transport, track selection, timeline, add track, add
-  MIDI clip, and a piano roll with draw, move, resize, delete, snap, zoom, undo,
-  and redo. Edits go through `Session`; structural edits are recompiled and
-  published to the realtime engine.
+- `odaw-format`: versioned DTOs, postcard payloads, JSON manifests, and v1/v2 → v3
+  migration. Track names, colors, mute, and solo are persisted.
+- `odaw-ui` / `odaw-app`: Ableton-like timeline with track headers, colors,
+  names, mute/solo, clip move/resize/split/duplicate, grid zoom and snapping,
+  MIDI note and audio waveform previews, and a collapsible/resizable piano roll
+  with drag-to-create, move, resize, right-click menus, snap, trackpad zoom,
+  undo, and redo. Audio files can be dropped onto the timeline as clips with
+  waveform previews. Edits go through `Session`; structural edits are recompiled
+  and published to the realtime engine.
 - `odaw`: a CLI for create, inspect, rename, demo, validate, render, and play.
 - CI: formatting, clippy with warnings denied, and the workspace test suite.
 
 Current limits: mono/stereo only, in-tree devices must live in a rack, devices
 with latency are rejected until compensation lands, the output device must
-support the project sample rate directly, MIDI notes are not recorded from
-hardware yet, audio clips are not rendered yet, there is no file dialog, no
-velocity lane, no loop/seek transport, and no automation or plugin UI.
+support the project sample rate directly, imported audio clips are not played
+yet, MIDI notes are not recorded from hardware, track grouping is not
+implemented, there is no file dialog, no velocity lane, no loop/seek transport,
+and no automation or plugin UI.
 
 See [ROADMAP.md](ROADMAP.md) for the product path and
 [.opencode/DESIGN.md](.opencode/DESIGN.md) for the architecture.

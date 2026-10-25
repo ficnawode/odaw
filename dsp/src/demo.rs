@@ -17,6 +17,8 @@ pub fn project() -> Project {
     project.nodes.insert(
         track,
         Node::new(NodeRole::Track)
+            .with_name("Lead")
+            .with_color(0x4c8bf5)
             .with_ports([
                 Port::input(PortId::from_raw(0), ChannelLayout::Stereo),
                 Port::output(PortId::from_raw(1), ChannelLayout::Stereo),

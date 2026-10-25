@@ -141,6 +141,20 @@ mod tests {
     }
 
     #[test]
+    fn muted_tracks_render_silence() {
+        let mut project = demo::project();
+        let track = project
+            .nodes
+            .iter()
+            .find(|(_, node)| node.role == odaw_core::NodeRole::Track)
+            .map(|(id, _)| *id)
+            .unwrap();
+        project.nodes.get_mut(&track).unwrap().muted = true;
+        let audio = render_project(&project, options(64, 1_000)).unwrap();
+        assert!(audio.samples.iter().all(|sample| *sample == 0.0));
+    }
+
+    #[test]
     fn zero_frames_render_an_empty_buffer() {
         let audio = render_project(&demo::project(), options(64, 0)).unwrap();
         assert!(audio.samples.is_empty());

@@ -73,6 +73,21 @@ impl DeviceProcessor for Gain {
 }
 
 #[derive(Debug, Default)]
+pub struct Silence;
+
+impl Silence {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl DeviceProcessor for Silence {
+    fn process(&mut self, block: &mut Block<'_>) {
+        block.output.fill(0.0);
+    }
+}
+
+#[derive(Debug, Default)]
 pub struct PassThrough;
 
 impl PassThrough {
