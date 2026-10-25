@@ -82,6 +82,22 @@ pub struct LoopRegion {
     pub end: Tick,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TickRange {
+    pub start: Tick,
+    pub end: Tick,
+}
+
+impl TickRange {
+    pub fn len(self) -> Tick {
+        Tick::from_raw(self.end.raw() - self.start.raw())
+    }
+
+    pub fn contains(self, tick: Tick) -> bool {
+        self.start <= tick && tick < self.end
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct TempoSegment {
     point: TempoPoint,
@@ -261,6 +277,18 @@ mod tests {
             }],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn tick_ranges_are_half_open() {
+        let range = TickRange {
+            start: Tick::from_raw(10),
+            end: Tick::from_raw(20),
+        };
+        assert!(range.contains(Tick::from_raw(10)));
+        assert!(range.contains(Tick::from_raw(19)));
+        assert!(!range.contains(Tick::from_raw(20)));
+        assert_eq!(range.len(), Tick::from_raw(10));
     }
 
     #[test]

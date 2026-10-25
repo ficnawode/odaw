@@ -19,6 +19,7 @@ pub use params::{ParamAddress, ParamId, ParamKind, ParamSchema, ParamValue};
 pub use project::{Meta, Project, ProjectError};
 pub use schema::NodeSchema;
 pub use time::{
-    Frames, LoopRegion, Marker, PPQ, TempoError, TempoMap, TempoPoint, Tick, TimeSignature,
+    Frames, LoopRegion, Marker, PPQ, TempoError, TempoMap, TempoPoint, Tick, TickRange,
+    TimeSignature,
 };
 pub use validation::{EdgeSide, ValidationError};

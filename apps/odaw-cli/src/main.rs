@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use odaw_control::{RenameProject, Session, SessionError};
 use odaw_core::{NodeRole, Project, ProjectError};
 use odaw_format::{Container, ContainerError, ProjectFile};
 use thiserror::Error;
@@ -38,6 +39,8 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Rename a project through the operator/session path.
+    Rename { path: PathBuf, name: String },
     /// Check that a project container loads and validates.
     Validate { path: PathBuf },
 }
@@ -62,6 +65,7 @@ fn run() -> Result<(), CliError> {
             force,
         } => create_project(&path, name, sample_rate.get(), seed, force),
         Command::Inspect { path, json } => inspect_project(&path, json),
+        Command::Rename { path, name } => rename_project(&path, &name),
         Command::Validate { path } => validate_project(&path),
     }
 }
@@ -124,6 +128,15 @@ fn validate_project(path: &Path) -> Result<(), CliError> {
     Ok(())
 }
 
+fn rename_project(path: &Path, name: &str) -> Result<(), CliError> {
+    let project = Container::new(path).load()?;
+    let mut session = Session::new(project)?;
+    session.apply(&RenameProject::new(name))?;
+    Container::new(path).save(session.project())?;
+    println!("renamed {} to {name}", path.display());
+    Ok(())
+}
+
 fn project_name(path: &Path) -> String {
     path.file_stem()
         .and_then(|name| name.to_str())
@@ -136,6 +149,8 @@ fn project_name(path: &Path) -> String {
 enum CliError {
     #[error(transparent)]
     Container(#[from] ContainerError),
+    #[error(transparent)]
+    Control(#[from] SessionError),
     #[error(transparent)]
     Project(#[from] ProjectError),
     #[error("refusing to overwrite {path}; pass --force")]

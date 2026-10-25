@@ -13,8 +13,8 @@ depend on the render-plan and parameter contracts.
 
 | Milestone | Phase | Outcome |
 | --- | --- | --- |
-| M0 Foundation | 0 | Green workspace, core data, versioned container. **This commit.** |
-| M1 Control core | 1 | Commands, transactions, undo, operators, selection. |
+| M0 Foundation | 0 | Green workspace, core data, versioned container. **Done.** |
+| M1 Control core | 1 | Commands, transactions, undo, operators, selection. **This commit.** |
 | M2 First sound | 2-3 | Deterministic offline WAV, then realtime playback. |
 | M3 Arrangement and headless product | 4-5 | Sections, loops, usable CLI. |
 | M4 UI shell and track selection | 6 | Native window, transport, track list, timeline. |
@@ -47,6 +47,7 @@ Selection {
     clips: set<ClipId>,
     notes: set<NoteId>,       // once notes exist
     range: option<TickRange>,
+    focused_node: option<NodeId>,
 }
 ```
 
@@ -60,6 +61,10 @@ Acceptance:
 - undo and redo restore both the document and the render-side effects;
 - a failed command leaves no partial edit;
 - selection survives undo if its ids still exist, and drops stale ids.
+
+Implemented in this commit. Remaining follow-up: the versioned command-log DTOs
+and the on-disk operation log. Commands are versioned data today; their log
+encoding is not written yet.
 
 ## M2 — First sound
 
@@ -215,9 +220,9 @@ move ahead of CLAP, but the device interface must not fork.
 
 ## Immediate next steps after this commit
 
-1. Commit this tree as `Initial commit`.
-2. Start Phase 1 with `control`: `Command`, `Tx`, `dispatch`, `ChangeSet`,
-   `History`, `Operator`, `Session`, and the non-document `Selection`.
-3. Add a command-log replay test before adding UI.
-4. Add a minimal compiler and gain/master path with a golden WAV.
+1. Commit this tree as the control-core commit.
+2. Add the versioned command-log DTOs and operation log on top of `format`.
+3. Start Phase 2: `compile`, `engine`, `dsp`, and `render`, with a minimal
+   gain/master path and a golden WAV.
+4. Add realtime playback and atomic plan handoff.
 5. Only then add the UI shell, then the piano roll and automation.

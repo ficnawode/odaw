@@ -810,8 +810,9 @@ Resolved (items already stated in section 3 are not repeated):
 5. `[CONFIRMED]` A `History` entry stores the operator invocation
    `(id, version, params)` when present, plus the resulting commands for the
    operation log. See sections 2.4 and 2.6.
-6. `[CONFIRMED]` `ChangeSet` shape is fixed as a structured, composable,
-   directionless delta. See section 2.7.
+6. `[CONFIRMED]` `ChangeSet` is a structured, composable, directionless delta:
+   touched-id sets plus structural, layout/latency, meta/tempo, and arrangement
+   flags. It records no before/after values. See section 2.7.
 7. `[CONFIRMED]` Asset blobs live in `AssetStore` outside `History`, and
    memory has two budgets: structural (transaction count) and asset bytes.
    See sections 2.9 and 2.10.
@@ -821,13 +822,19 @@ Resolved (items already stated in section 3 are not repeated):
    id-keyed sets and ordered maps, `im::Vector` for ordered lists. The core
    aliases them as `PersistentMap` and `PersistentVector`, so replacing the
    library later stays localized.
+10. `[CONFIRMED]` Selection is control-side state, not document state. It is
+    not serialized in the project and is not an undo step. It holds nodes,
+    clips, an optional tick range, and a separate focused node; it is pruned
+    after edits and undo/redo.
+11. `[CONFIRMED]` The default `History` bound is 512 transactions. Asset bytes
+    are bounded separately; see section 2.10.
 
 Still open:
 
 1. `[OPEN]` How value smoothing is specified: per node, per node kind, or
    one global policy.
-2. `[OPEN]` The maximum structural size of one transaction, the transaction
-   count bound, and the asset byte budget. See section 2.10.
+2. `[OPEN]` The maximum structural size of one transaction and the asset byte
+   budget. See section 2.10.
 3. `[OPEN]` The thinning tolerance used when recording automation into
    `Keyframe`s. See section 4.3.
 4. `[OPEN]` Whether a VST3 (or AU) adapter is added later behind the same

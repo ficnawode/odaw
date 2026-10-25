@@ -14,19 +14,24 @@ Project -> RenderPlan -> WAV (offline) / audio device (realtime)
 
 ## Status
 
-This is the **Phase 0 foundation**: the workspace, core data types, exact
-musical time, the persistent project model, the versioned container format, and
-CI. Nothing is audible yet.
+This is the **Phase 1 control core**: commands, atomic staging, dispatch,
+bounded history with undo/redo, operators, and non-document selection. Nothing
+is audible yet.
 
 What works today:
 
 - `odaw-core`: typed ids, integer `Tick`/`Frames` time with exact tempo-map
   conversion, graph/port/parameter/automation types, persistent `Project`, and
   structural validation.
+- `odaw-control`: versioned commands, the `Tx` staging area, the single
+  dispatcher, `ChangeSet` tracking, bounded `History` with undo/redo, operators
+  and their registry, and a `Session` that owns the document, history, selection,
+  and effects hook.
 - `odaw-format`: versioned DTOs separate from the live types, a postcard project
   payload, a JSON manifest, and crash-conscious container save/load with
   interrupted-save recovery.
-- `odaw`: a small CLI that creates, inspects, and validates project containers.
+- `odaw`: a small CLI that creates, inspects, renames, and validates project
+  containers.
 - CI: formatting, clippy with warnings denied, and the workspace test suite.
 
 See [ROADMAP.md](ROADMAP.md) for the product path and
@@ -46,6 +51,7 @@ cargo fmt --all --check
 cargo run -p odaw-cli -- new song.odaw
 cargo run -p odaw-cli -- inspect song.odaw
 cargo run -p odaw-cli -- inspect song.odaw --json
+cargo run -p odaw-cli -- rename song.odaw "New name"
 cargo run -p odaw-cli -- validate song.odaw
 ```
 
@@ -60,17 +66,18 @@ song.odaw/
 ```
 
 The asset directory is created but asset blobs are not stored yet; content
-addressing and the `AssetStore` arrive with the control side.
+addressing and the `AssetStore` arrive with the render/asset work.
 
 ## Layout
 
 ```text
 core/             pure document types and validation
 format/           versioned DTOs, migrations, container I/O
+control/          commands, staging, dispatch, history, operators, selection
 apps/odaw-cli/    headless CLI
 ```
 
-The crates from `DESIGN.md` (`compile`, `engine`, `control`, `dsp`, `platform`,
+The remaining crates from `DESIGN.md` (`compile`, `engine`, `dsp`, `platform`,
 `plugins`, `render`, `ui`, ...) are added when their phase starts, so the tree
 never carries empty placeholders.
 

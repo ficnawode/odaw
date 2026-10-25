@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "core",
     "format",
+    "control",
     "apps/odaw-cli",
 ]
 

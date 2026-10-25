@@ -82,3 +82,29 @@ fn inspect_reports_a_missing_container() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("does not exist"));
 }
+
+#[test]
+fn rename_goes_through_the_session_and_persists() {
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().join("song.odaw");
+    let path = path.to_str().unwrap();
+
+    assert!(
+        odaw()
+            .args(["new", path])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let renamed = odaw().args(["rename", path, "renamed"]).output().unwrap();
+    assert!(
+        renamed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&renamed.stderr)
+    );
+
+    let inspected = odaw().args(["inspect", path, "--json"]).output().unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&inspected.stdout).unwrap();
+    assert_eq!(json["project"]["meta"]["name"], "renamed");
+}

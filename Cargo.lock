@@ -323,10 +323,19 @@ name = "odaw-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "odaw-control",
  "odaw-core",
  "odaw-format",
  "serde_json",
  "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "odaw-control"
+version = "0.1.0"
+dependencies = [
+ "odaw-core",
  "thiserror",
 ]
 
