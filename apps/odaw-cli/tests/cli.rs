@@ -108,3 +108,119 @@ fn rename_goes_through_the_session_and_persists() {
     let json: serde_json::Value = serde_json::from_slice(&inspected.stdout).unwrap();
     assert_eq!(json["project"]["meta"]["name"], "renamed");
 }
+
+#[test]
+fn demo_renders_a_wav_file() {
+    let directory = TempDir::new().unwrap();
+    let project = directory.path().join("demo.odaw");
+    let output = directory.path().join("demo.wav");
+
+    let created = odaw()
+        .args(["demo", project.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+
+    let rendered = odaw()
+        .args([
+            "render",
+            project.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "--duration",
+            "0.1",
+            "--block-size",
+            "64",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        rendered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rendered.stderr)
+    );
+
+    let bytes = std::fs::read(&output).unwrap();
+    assert_eq!(&bytes[0..4], b"RIFF");
+    assert_eq!(&bytes[8..12], b"WAVE");
+    assert_eq!(&bytes[36..40], b"data");
+    assert_eq!(
+        u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]),
+        48_000
+    );
+    assert_eq!(u16::from_le_bytes([bytes[22], bytes[23]]), 2);
+    assert_eq!(
+        u32::from_le_bytes([bytes[40], bytes[41], bytes[42], bytes[43]]) as usize,
+        bytes.len() - 44
+    );
+}
+
+#[test]
+fn demo_render_uses_the_loop_length_by_default() {
+    let directory = TempDir::new().unwrap();
+    let project = directory.path().join("demo.odaw");
+    let output = directory.path().join("demo.wav");
+
+    assert!(
+        odaw()
+            .args(["demo", project.to_str().unwrap()])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let rendered = odaw()
+        .args([
+            "render",
+            project.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        rendered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rendered.stderr)
+    );
+
+    let bytes = std::fs::read(&output).unwrap();
+    assert!(bytes.len() > 1_000_000);
+    assert_eq!(
+        u32::from_le_bytes([bytes[40], bytes[41], bytes[42], bytes[43]]) as usize,
+        bytes.len() - 44
+    );
+}
+
+#[test]
+fn render_rejects_an_invalid_duration() {
+    let directory = TempDir::new().unwrap();
+    let project = directory.path().join("demo.odaw");
+    let output = directory.path().join("demo.wav");
+
+    assert!(
+        odaw()
+            .args(["demo", project.to_str().unwrap()])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let rendered = odaw()
+        .args([
+            "render",
+            project.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "--duration",
+            "-1",
+        ])
+        .output()
+        .unwrap();
+    assert!(!rendered.status.success());
+    assert!(String::from_utf8_lossy(&rendered.stderr).contains("duration"));
+}

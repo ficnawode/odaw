@@ -14,8 +14,8 @@ depend on the render-plan and parameter contracts.
 | Milestone | Phase | Outcome |
 | --- | --- | --- |
 | M0 Foundation | 0 | Green workspace, core data, versioned container. **Done.** |
-| M1 Control core | 1 | Commands, transactions, undo, operators, selection. **This commit.** |
-| M2 First sound | 2-3 | Deterministic offline WAV, then realtime playback. |
+| M1 Control core | 1 | Commands, transactions, undo, operators, selection. **Done.** |
+| M2 First sound | 2-3 | Deterministic offline WAV. **Offline done; realtime next.** |
 | M3 Arrangement and headless product | 4-5 | Sections, loops, usable CLI. |
 | M4 UI shell and track selection | 6 | Native window, transport, track list, timeline. |
 | M5 Piano roll | 6-7 | MIDI editing and sample-accurate playback. |
@@ -86,6 +86,20 @@ Acceptance:
 - core devices render identically across block sizes;
 - the audio callback does not allocate, lock, do I/O, or parse;
 - the app plays the same project through the sound card.
+
+Implemented in this commit: rack flattening, deterministic DAG ordering, cycle
+and channel checks, the parameter buffer, the block executor, primitive
+sine/gain/pass devices, offline WAV rendering, block-size-independence tests, and
+`odaw demo` / `odaw render`.
+
+Remaining in M2:
+
+- latency compensation and delay nodes (non-zero latency is rejected for now);
+- devices used outside a rack or in parallel/sidechain device paths;
+- sample-accurate MIDI scheduling;
+- realtime `cpal` playback and atomic plan handoff;
+- incremental recompile and parameter updates on a live engine;
+- golden WAV fixtures in CI.
 
 ## M3 — Arrangement and headless product
 
@@ -220,9 +234,11 @@ move ahead of CLAP, but the device interface must not fork.
 
 ## Immediate next steps after this commit
 
-1. Commit this tree as the control-core commit.
-2. Add the versioned command-log DTOs and operation log on top of `format`.
-3. Start Phase 2: `compile`, `engine`, `dsp`, and `render`, with a minimal
-   gain/master path and a golden WAV.
-4. Add realtime playback and atomic plan handoff.
-5. Only then add the UI shell, then the piano roll and automation.
+1. Commit this tree as the first-sound commit.
+2. Add realtime `cpal` playback and atomic plan handoff, reusing the offline
+   engine.
+3. Add sample-accurate MIDI scheduling and a simple polyphonic instrument so the
+   piano roll has a real sound source.
+4. Add the versioned command-log DTOs and operation log.
+5. Add the UI shell with track selection, then the piano roll and automation.
+6. Add latency compensation and support for parallel/sidechain device paths.

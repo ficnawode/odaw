@@ -325,9 +325,22 @@ dependencies = [
  "clap",
  "odaw-control",
  "odaw-core",
+ "odaw-dsp",
  "odaw-format",
+ "odaw-io",
+ "odaw-render",
  "serde_json",
  "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "odaw-compile"
+version = "0.1.0"
+dependencies = [
+ "odaw-core",
+ "odaw-dsp",
+ "odaw-engine",
  "thiserror",
 ]
 
@@ -349,6 +362,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "odaw-dsp"
+version = "0.1.0"
+dependencies = [
+ "odaw-core",
+ "odaw-engine",
+]
+
+[[package]]
+name = "odaw-engine"
+version = "0.1.0"
+dependencies = [
+ "odaw-core",
+ "thiserror",
+]
+
+[[package]]
 name = "odaw-format"
 version = "0.1.0"
 dependencies = [
@@ -357,6 +386,24 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "odaw-io"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
+name = "odaw-render"
+version = "0.1.0"
+dependencies = [
+ "odaw-compile",
+ "odaw-core",
+ "odaw-dsp",
+ "odaw-engine",
  "thiserror",
 ]
 

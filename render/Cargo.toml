@@ -1,0 +1,15 @@
+[package]
+name = "odaw-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+odaw-compile = { path = "../compile" }
+odaw-core = { path = "../core" }
+odaw-dsp = { path = "../dsp" }
+odaw-engine = { path = "../engine" }
+thiserror.workspace = true
+
+[lints]
+workspace = true

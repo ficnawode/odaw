@@ -1,11 +1,16 @@
+use std::fs::File;
+use std::io::{self, BufWriter, Write};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use odaw_control::{RenameProject, Session, SessionError};
-use odaw_core::{NodeRole, Project, ProjectError};
+use odaw_core::{NodeRole, Project, ProjectError, TempoError, Tick};
+use odaw_dsp::demo;
 use odaw_format::{Container, ContainerError, ProjectFile};
+use odaw_io::{WavError, WavSpec, write_wav};
+use odaw_render::{RenderError, RenderOptions, render_project};
 use thiserror::Error;
 
 #[derive(Debug, Parser)]
@@ -41,6 +46,23 @@ enum Command {
     },
     /// Rename a project through the operator/session path.
     Rename { path: PathBuf, name: String },
+    /// Create a demo project with a sine instrument and gain stage.
+    Demo {
+        path: PathBuf,
+        #[arg(long)]
+        force: bool,
+    },
+    /// Render a project to a 16-bit PCM WAV file.
+    Render {
+        path: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+        #[arg(long, default_value = "512")]
+        block_size: std::num::NonZeroUsize,
+        /// Render length in seconds. Defaults to the project's loop or clip end.
+        #[arg(long, allow_hyphen_values = true)]
+        duration: Option<f64>,
+    },
     /// Check that a project container loads and validates.
     Validate { path: PathBuf },
 }
@@ -66,6 +88,13 @@ fn run() -> Result<(), CliError> {
         } => create_project(&path, name, sample_rate.get(), seed, force),
         Command::Inspect { path, json } => inspect_project(&path, json),
         Command::Rename { path, name } => rename_project(&path, &name),
+        Command::Demo { path, force } => create_demo(&path, force),
+        Command::Render {
+            path,
+            output,
+            block_size,
+            duration,
+        } => render_project_file(&path, &output, block_size, duration),
         Command::Validate { path } => validate_project(&path),
     }
 }
@@ -137,6 +166,85 @@ fn rename_project(path: &Path, name: &str) -> Result<(), CliError> {
     Ok(())
 }
 
+fn create_demo(path: &Path, force: bool) -> Result<(), CliError> {
+    if path.exists() && !force {
+        return Err(CliError::Exists {
+            path: path.to_path_buf(),
+        });
+    }
+    let project = demo::project();
+    Container::new(path).save(&project)?;
+    println!("created demo {}", path.display());
+    Ok(())
+}
+
+fn render_project_file(
+    path: &Path,
+    output: &Path,
+    block_size: std::num::NonZeroUsize,
+    duration: Option<f64>,
+) -> Result<(), CliError> {
+    let project = Container::new(path).load()?;
+    let frames = render_frames(&project, duration)?;
+    let audio = render_project(&project, RenderOptions { block_size, frames })?;
+    let channels =
+        u16::try_from(audio.channels).map_err(|_| CliError::UnsupportedChannels(audio.channels))?;
+
+    let file = File::create(output).map_err(|source| CliError::Io {
+        path: output.to_path_buf(),
+        source,
+    })?;
+    let mut writer = BufWriter::new(file);
+    write_wav(
+        &mut writer,
+        WavSpec {
+            sample_rate: audio.sample_rate,
+            channels,
+        },
+        &audio.samples,
+    )?;
+    writer.flush().map_err(|source| CliError::Io {
+        path: output.to_path_buf(),
+        source,
+    })?;
+
+    println!(
+        "rendered {} frames at {} Hz to {}",
+        frames,
+        audio.sample_rate,
+        output.display()
+    );
+    Ok(())
+}
+
+fn render_frames(project: &Project, duration: Option<f64>) -> Result<u64, CliError> {
+    if let Some(seconds) = duration {
+        if !seconds.is_finite() || seconds < 0.0 || seconds > u64::MAX as f64 {
+            return Err(CliError::InvalidDuration(seconds));
+        }
+        return Ok((seconds * f64::from(project.meta.sample_rate)).round() as u64);
+    }
+
+    if let Some(tick) = project_end_tick(project) {
+        let frames = project.tempo.tick_to_frames(tick)?;
+        return Ok(u64::try_from(frames.raw().max(0)).expect("frames are non-negative"));
+    }
+
+    Ok(u64::from(project.meta.sample_rate) * 5)
+}
+
+fn project_end_tick(project: &Project) -> Option<Tick> {
+    let mut end: Option<Tick> = None;
+    for loop_region in &project.loops {
+        end = Some(end.map_or(loop_region.end, |current| current.max(loop_region.end)));
+    }
+    for clip in project.clips.values() {
+        let clip_end = Tick::from_raw(clip.start.raw().saturating_add(clip.length.raw()));
+        end = Some(end.map_or(clip_end, |current| current.max(clip_end)));
+    }
+    end.filter(|tick| *tick > Tick::ZERO)
+}
+
 fn project_name(path: &Path) -> String {
     path.file_stem()
         .and_then(|name| name.to_str())
@@ -153,8 +261,24 @@ enum CliError {
     Control(#[from] SessionError),
     #[error(transparent)]
     Project(#[from] ProjectError),
+    #[error(transparent)]
+    Render(#[from] RenderError),
+    #[error(transparent)]
+    Wav(#[from] WavError),
+    #[error(transparent)]
+    Time(#[from] TempoError),
     #[error("refusing to overwrite {path}; pass --force")]
     Exists { path: PathBuf },
+    #[error("invalid render duration {0}")]
+    InvalidDuration(f64),
+    #[error("unsupported channel count {0}")]
+    UnsupportedChannels(usize),
+    #[error("failed to write {path}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
     #[error("failed to encode JSON: {0}")]
     Json(#[from] serde_json::Error),
 }

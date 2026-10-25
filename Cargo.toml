@@ -2,6 +2,11 @@
 resolver = "3"
 members = [
     "core",
+    "engine",
+    "dsp",
+    "compile",
+    "io",
+    "render",
     "format",
     "control",
     "apps/odaw-cli",

@@ -1,0 +1,12 @@
+[package]
+name = "odaw-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+odaw-core = { path = "../core" }
+thiserror.workspace = true
+
+[lints]
+workspace = true

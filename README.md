@@ -14,9 +14,9 @@ Project -> RenderPlan -> WAV (offline) / audio device (realtime)
 
 ## Status
 
-This is the **Phase 1 control core**: commands, atomic staging, dispatch,
-bounded history with undo/redo, operators, and non-document selection. Nothing
-is audible yet.
+This is the **Phase 2 first-sound milestone**: the project compiles into a
+render plan and renders deterministic audio offline to a WAV file. Realtime
+playback is next.
 
 What works today:
 
@@ -27,12 +27,24 @@ What works today:
   dispatcher, `ChangeSet` tracking, bounded `History` with undo/redo, operators
   and their registry, and a `Session` that owns the document, history, selection,
   and effects hook.
+- `odaw-engine`: the immutable `RenderPlan`, a typed parameter buffer, and a
+  block executor that sums inputs in declared order.
+- `odaw-dsp`: primitive in-tree devices (`builtin.sine`, `builtin.gain`,
+  `builtin.pass`) and the built-in demo project.
+- `odaw-compile`: rack flattening, DAG topological sort, cycle detection,
+  port/channel checks, and plan construction.
+- `odaw-render`: deterministic offline rendering with fixed block size.
+- `odaw-io`: a 16-bit PCM WAV writer.
 - `odaw-format`: versioned DTOs separate from the live types, a postcard project
   payload, a JSON manifest, and crash-conscious container save/load with
   interrupted-save recovery.
-- `odaw`: a small CLI that creates, inspects, renames, and validates project
-  containers.
+- `odaw`: a CLI that creates, inspects, renames, demos, validates, and renders
+  projects.
 - CI: formatting, clippy with warnings denied, and the workspace test suite.
+
+Current limits: mono/stereo only, in-tree devices must live in a rack, devices
+with latency are rejected until compensation lands, and realtime/MIDI scheduling
+is not wired yet.
 
 See [ROADMAP.md](ROADMAP.md) for the product path and
 [.opencode/DESIGN.md](.opencode/DESIGN.md) for the architecture.
@@ -52,6 +64,8 @@ cargo run -p odaw-cli -- new song.odaw
 cargo run -p odaw-cli -- inspect song.odaw
 cargo run -p odaw-cli -- inspect song.odaw --json
 cargo run -p odaw-cli -- rename song.odaw "New name"
+cargo run -p odaw-cli -- demo demo.odaw
+cargo run -p odaw-cli -- render demo.odaw -o demo.wav --duration 2
 cargo run -p odaw-cli -- validate song.odaw
 ```
 
@@ -72,14 +86,18 @@ addressing and the `AssetStore` arrive with the render/asset work.
 
 ```text
 core/             pure document types and validation
+engine/           RenderPlan, parameter buffer, block executor
+dsp/              primitive in-tree devices and the demo project
+compile/          Project -> RenderPlan
+io/               decoders and encoders
+render/           offline renderer
 format/           versioned DTOs, migrations, container I/O
 control/          commands, staging, dispatch, history, operators, selection
 apps/odaw-cli/    headless CLI
 ```
 
-The remaining crates from `DESIGN.md` (`compile`, `engine`, `dsp`, `platform`,
-`plugins`, `render`, `ui`, ...) are added when their phase starts, so the tree
-never carries empty placeholders.
+The remaining crates from `DESIGN.md` (`platform`, `plugins`, `ui`, ...) are
+added when their phase starts, so the tree never carries empty placeholders.
 
 ## Design documents
 

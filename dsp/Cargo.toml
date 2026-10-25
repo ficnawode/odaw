@@ -1,0 +1,12 @@
+[package]
+name = "odaw-dsp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+odaw-core = { path = "../core" }
+odaw-engine = { path = "../engine" }
+
+[lints]
+workspace = true
