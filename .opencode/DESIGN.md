@@ -890,6 +890,12 @@ Resolved (items already stated in section 3 are not repeated):
     roll, audio clips show a waveform/detail view plus track options, and a
     track with no selected clip shows track options. The roll remains one
     toggle away for MIDI tracks and the panel stays user-resizable.
+23. `[CONFIRMED]` The Time dialog edits the first (global) time signature at
+    tick zero, the tempo, and the cursor bar/beat. Bar/beat conversion is
+    `((bar - 1) * numerator + (beat - 1)) * PPQ`; the signature numerator also
+    drives bar lines and labels in the timeline and piano roll. Per-section
+    signature changes remain supported by the document but are not exposed in
+    this dialog yet.
 
 Still open:
 

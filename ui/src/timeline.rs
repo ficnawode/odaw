@@ -153,6 +153,11 @@ pub fn show(
         .unwrap_or(Tick::from_raw(16 * PPQ))
         .max(Tick::from_raw(16 * PPQ));
     let total_beats = (end_tick.raw().max(1) as f64 / PPQ as f64).ceil() as i64;
+    let beats_per_bar = project
+        .signatures
+        .iter()
+        .next()
+        .map_or(4, |signature| signature.numerator.max(1) as i64);
     let viewport_width = (ui.available_width() - HEADER_WIDTH - 18.0).max(320.0);
     let content_width = (total_beats as f32 * state.pixels_per_beat).max(viewport_width);
     let row_count = tracks.len() + usize::from(master.is_some());
@@ -199,6 +204,7 @@ pub fn show(
                     grid_height,
                     state.pixels_per_beat,
                     total_beats,
+                    beats_per_bar,
                     tracks.len(),
                     master.is_some(),
                 );
@@ -756,6 +762,7 @@ fn draw_grid(
     height: f32,
     pixels_per_beat: f32,
     total_beats: i64,
+    beats_per_bar: i64,
     track_rows: usize,
     has_master: bool,
 ) {
@@ -803,7 +810,7 @@ fn draw_grid(
             if x > origin.x + width {
                 break;
             }
-            let bar = beat % 4 == 0 && subdivision == 0;
+            let bar = beat % beats_per_bar.max(1) == 0 && subdivision == 0;
             painter.line_segment(
                 [pos2(x, origin.y + RULER_HEIGHT), pos2(x, origin.y + height)],
                 Stroke::new(
@@ -824,12 +831,12 @@ fn draw_grid(
                 ),
             );
         }
-        if beat % 4 == 0 {
+        if beat % beats_per_bar.max(1) == 0 {
             let x = origin.x + beat as f32 * pixels_per_beat;
             painter.text(
                 pos2(x + 4.0, origin.y + 3.0),
                 Align2::LEFT_TOP,
-                format!("{}", beat / 4 + 1),
+                format!("{}", beat / beats_per_bar.max(1) + 1),
                 FontId::monospace(9.0),
                 Color32::from_rgb(145, 151, 164),
             );

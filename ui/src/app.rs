@@ -19,11 +19,21 @@ pub struct OdawApp {
     timeline: TimelineState,
     rename: Option<RenameState>,
     tempo_edit: Option<f64>,
+    time_dialog: Option<TimeDraft>,
 }
 
 struct RenameState {
     track: NodeId,
     name: String,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TimeDraft {
+    bar: i64,
+    beat: f64,
+    bpm: f64,
+    numerator: u16,
+    denominator: u16,
 }
 
 impl OdawApp {
@@ -38,6 +48,7 @@ impl OdawApp {
             timeline: TimelineState::default(),
             rename: None,
             tempo_edit: None,
+            time_dialog: None,
         }
     }
 
@@ -63,6 +74,8 @@ impl OdawApp {
         });
         let save = ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::S));
         let split = ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::E));
+        let time_dialog =
+            ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::T));
         let copy = ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::C));
         let paste = ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::V));
         let select_all =
@@ -98,6 +111,9 @@ impl OdawApp {
         if split {
             self.editor.split_selected_at_cursor();
             self.timeline.clear();
+        }
+        if time_dialog {
+            self.open_time_dialog();
         }
         if copy {
             self.editor.copy_selected_notes();
@@ -141,8 +157,27 @@ impl OdawApp {
         }
     }
 
+    fn open_time_dialog(&mut self) {
+        let signature = self.editor.time_signature();
+        let (bar, beat) = bars_beats(self.editor.cursor_tick(), signature.numerator.max(1) as i64);
+        self.time_dialog = Some(TimeDraft {
+            bar,
+            beat,
+            bpm: self.editor.tempo_bpm(),
+            numerator: signature.numerator,
+            denominator: signature.denominator,
+        });
+    }
+
     fn transport(&mut self, ui: &mut egui::Ui) {
         let project = self.editor.session.project().clone();
+        let signature = project
+            .signatures
+            .iter()
+            .next()
+            .copied()
+            .unwrap_or_default();
+        let beats_per_bar = signature.numerator.max(1) as i64;
         let title = match &self.editor.path {
             Some(path) => format!("{} — {}", project.meta.name, path.display()),
             None => format!("{} (demo)", project.meta.name),
@@ -163,8 +198,16 @@ impl OdawApp {
                 self.editor.set_cursor(Tick::ZERO);
             }
             let tick = self.editor.playhead_tick();
-            let (bar, beat) = bars_beats(tick);
+            let (bar, beat) = bars_beats(tick, beats_per_bar);
             ui.monospace(format!("{bar}.{beat:.1}"));
+            ui.label(format!("{}/{}", signature.numerator, signature.denominator));
+            if ui
+                .button("Time")
+                .on_hover_text("Edit position, tempo, and time signature")
+                .clicked()
+            {
+                self.open_time_dialog();
+            }
             ui.label(format!(
                 "{:.2}s / {:.2}s",
                 self.editor.position_seconds(),
@@ -395,6 +438,106 @@ impl OdawApp {
         }
     }
 
+    fn time_window(&mut self, ctx: &egui::Context) {
+        let Some(mut draft) = self.time_dialog.take() else {
+            return;
+        };
+        let mut open = true;
+        let mut apply = false;
+        let mut cancel = false;
+        egui::Window::new("Time")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Bar");
+                    ui.add(
+                        egui::DragValue::new(&mut draft.bar)
+                            .range(1..=1_000_000)
+                            .speed(0.25),
+                    );
+                    let max_beat = draft.numerator.max(1) as f64;
+                    ui.label("Beat");
+                    ui.add(
+                        egui::DragValue::new(&mut draft.beat)
+                            .range(1.0..=max_beat)
+                            .speed(0.25)
+                            .max_decimals(2),
+                    );
+                    if ui.button("From cursor").clicked() {
+                        let (bar, beat) =
+                            bars_beats(self.editor.cursor_tick(), draft.numerator.max(1) as i64);
+                        draft.bar = bar;
+                        draft.beat = beat;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Tempo");
+                    ui.add(
+                        egui::DragValue::new(&mut draft.bpm)
+                            .range(20.0..=999.0)
+                            .speed(0.1)
+                            .suffix(" BPM"),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Time signature");
+                    ui.add(egui::DragValue::new(&mut draft.numerator).range(1..=32));
+                    ui.label("/");
+                    egui::ComboBox::from_id_salt("time_signature_denominator")
+                        .selected_text(draft.denominator.to_string())
+                        .show_ui(ui, |ui| {
+                            for denominator in [1u16, 2, 4, 8, 16, 32] {
+                                ui.selectable_value(
+                                    &mut draft.denominator,
+                                    denominator,
+                                    denominator.to_string(),
+                                );
+                            }
+                        });
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Apply").clicked() {
+                        apply = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+                if ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+                    apply = true;
+                }
+                if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+                    cancel = true;
+                }
+            });
+
+        if apply {
+            if (draft.bpm - self.editor.tempo_bpm()).abs() > 0.05 {
+                self.editor.set_tempo_bpm(draft.bpm);
+                self.mixer.clear();
+                self.piano_roll.clear();
+            }
+            let signature = self.editor.time_signature();
+            if draft.numerator != signature.numerator || draft.denominator != signature.denominator
+            {
+                self.editor
+                    .set_time_signature(draft.numerator, draft.denominator);
+                self.piano_roll.clear();
+            }
+            self.editor.set_cursor_bar_beat(draft.bar, draft.beat);
+            open = false;
+        }
+        if cancel {
+            open = false;
+        }
+        if open {
+            self.time_dialog = Some(draft);
+        }
+    }
+
     fn status(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             if let Some(error) = &self.editor.error {
@@ -403,7 +546,7 @@ impl OdawApp {
                 ui.label(status);
             } else {
                 ui.label(
-                    "Space play/stop · Ctrl+E split · Ctrl+C/V notes · Up/Down transpose · drag clips/notes · right-click menus",
+                    "Space play/stop · Ctrl+E split · Ctrl+T time · Ctrl+C/V notes · Up/Down transpose · right-click menus",
                 );
             }
             if let Some(clip) = self.editor.selected_clip() {
@@ -555,6 +698,7 @@ impl eframe::App for OdawApp {
         }
 
         self.rename_window(ctx);
+        self.time_window(ctx);
 
         if self.editor.playing || self.mixer.active() {
             ctx.request_repaint_after(Duration::from_millis(16));
@@ -584,8 +728,9 @@ fn track_name(node: &Node, id: NodeId) -> String {
         .unwrap_or_else(|| format!("Track {}", id.raw()))
 }
 
-fn bars_beats(tick: Tick) -> (i64, f64) {
-    let bar_ticks = 4 * PPQ;
+fn bars_beats(tick: Tick, beats_per_bar: i64) -> (i64, f64) {
+    let beats_per_bar = beats_per_bar.max(1);
+    let bar_ticks = beats_per_bar * PPQ;
     let bar = tick.raw().div_euclid(bar_ticks) + 1;
     let beat = tick.raw().rem_euclid(bar_ticks) as f64 / PPQ as f64 + 1.0;
     (bar, beat)
@@ -617,4 +762,17 @@ fn configure_style(ctx: &egui::Context) {
     style.spacing.item_spacing = egui::vec2(8.0, 6.0);
     style.spacing.button_padding = egui::vec2(8.0, 4.0);
     ctx.set_style(style);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bar_beat_display_follows_the_time_signature() {
+        assert_eq!(bars_beats(Tick::ZERO, 4), (1, 1.0));
+        assert_eq!(bars_beats(Tick::from_raw(4 * PPQ), 4), (2, 1.0));
+        assert_eq!(bars_beats(Tick::from_raw(3 * PPQ), 3), (2, 1.0));
+        assert_eq!(bars_beats(Tick::from_raw(4 * PPQ + PPQ / 2), 3), (2, 2.5));
+    }
 }

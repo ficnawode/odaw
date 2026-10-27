@@ -131,6 +131,13 @@ impl PianoRollState {
         }
 
         let notes: Vec<Note> = editor.notes(clip_id);
+        let beats_per_bar = editor
+            .session
+            .project()
+            .signatures
+            .iter()
+            .next()
+            .map_or(4, |signature| signature.numerator.max(1) as i64);
         let selected: BTreeSet<NoteId> = editor.session.selection().notes.clone();
         let previews: BTreeMap<NoteId, Note> = self
             .drag
@@ -165,6 +172,7 @@ impl PianoRollState {
                                 height,
                                 clip.length,
                                 self.pixels_per_beat,
+                                beats_per_bar,
                             );
                             let hovered = ui
                                 .input(|input| input.pointer.hover_pos())
@@ -660,6 +668,7 @@ fn draw_grid(
     height: f32,
     clip_length: Tick,
     pixels_per_beat: f32,
+    beats_per_bar: i64,
 ) {
     painter.rect_filled(
         Rect::from_min_size(origin, vec2(width, height)),
@@ -689,7 +698,7 @@ fn draw_grid(
         if x > origin.x + width {
             break;
         }
-        let is_bar = beat % 4 == 0;
+        let is_bar = beat % beats_per_bar.max(1) == 0;
         painter.line_segment(
             [pos2(x, origin.y), pos2(x, origin.y + height)],
             Stroke::new(

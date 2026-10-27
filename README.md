@@ -56,7 +56,9 @@ What works today:
   drag, and edits note groups with move, transpose, copy/paste, and duplicate.
   It also has note resize, right-click menus, snap, trackpad zoom, undo, and
   redo. Click the ruler or empty timeline to seek the red cursor; Ctrl+E splits
-  the selection at the cursor. Tempo is editable in the transport. Audio files
+  the selection at the cursor. Tempo is editable in the transport; the Time
+  dialog (Ctrl+T or the `Time` button) sets the bar/beat position, tempo, and
+  time signature. Audio files
   can be dropped onto the timeline as clips with waveform previews and played
   back through the track's gain/pan strip. The bottom panel follows the
   selection: the piano roll for MIDI clips, an audio clip detail view with a

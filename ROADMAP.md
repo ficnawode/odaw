@@ -133,7 +133,8 @@ rename, mute/solo, add/delete track, add MIDI clip, clip move/resize/split/
 duplicate, marquee multi-selection, grid zoom/snapping, MIDI and audio previews,
 drag/drop WAV/MP3 import with waveform previews and realtime audio-clip
 playback through the track strip, a contextual bottom panel (piano roll for
-MIDI, audio clip waveform/details, and track options), click/drag ruler seeking,
+MIDI, audio clip waveform/details, and track options), a Time dialog for
+bar/beat position, tempo, and time signature, click/drag ruler seeking,
 split-at-cursor, per-track gain/pan faders with post-fader stereo level meters,
 a single stereo master out strip in the timeline, inspector, and realtime
 publish on structural edits. Scrubbing uses the realtime seek command, fader

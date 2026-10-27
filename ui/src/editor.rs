@@ -11,7 +11,7 @@ use odaw_control::{
 use odaw_core::{
     Asset, AssetId, AssetKind, ChannelLayout, Clip, ClipContent, ClipId, Edge, Frames, Node,
     NodeId, NodeKind, NodePort, NodeRole, Note, NoteId, PPQ, ParamAddress, ParamId, ParamValue,
-    Port, PortDirection, PortId, Project, TempoPoint, Tick,
+    Port, PortDirection, PortId, Project, TempoPoint, Tick, TimeSignature,
 };
 use odaw_dsp::{AudioAsset, AudioSources, demo};
 use odaw_engine::{RealtimeEngine, RealtimeHandle, RealtimeState, realtime};
@@ -525,6 +525,56 @@ impl Editor {
             .map_or(120.0, |point| {
                 60_000_000.0 / f64::from(point.micros_per_quarter)
             })
+    }
+
+    pub fn time_signature(&self) -> TimeSignature {
+        self.session
+            .project()
+            .signatures
+            .iter()
+            .next()
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub fn set_time_signature(&mut self, numerator: u16, denominator: u16) {
+        let numerator = numerator.max(1);
+        let denominator = if matches!(denominator, 1 | 2 | 4 | 8 | 16 | 32) {
+            denominator
+        } else {
+            4
+        };
+        let mut signatures: Vec<TimeSignature> =
+            self.session.project().signatures.iter().copied().collect();
+        if let Some(first) = signatures.first_mut() {
+            first.numerator = numerator;
+            first.denominator = denominator;
+        } else {
+            signatures.push(TimeSignature {
+                tick: Tick::ZERO,
+                numerator,
+                denominator,
+            });
+        }
+        let result = self.session.apply_command(Command::new(CommandKind::Tempo(
+            TempoCommand::SetSignatures { signatures },
+        )));
+        if self.after_edit(result) {
+            self.status = Some(format!("time signature {numerator}/{denominator}"));
+        }
+    }
+
+    pub fn set_cursor_bar_beat(&mut self, bar: i64, beat: f64) {
+        let signature = self.time_signature();
+        let numerator = signature.numerator.max(1) as f64;
+        let bar = bar.max(1);
+        let beat = if beat.is_finite() {
+            beat.clamp(1.0, numerator)
+        } else {
+            1.0
+        };
+        let ticks = ((bar - 1) as f64 * numerator + (beat - 1.0)) * PPQ as f64;
+        self.set_cursor(Tick::from_raw(ticks.round().max(0.0) as i64));
     }
 
     pub fn set_tempo_bpm(&mut self, bpm: f64) {
@@ -1941,6 +1991,21 @@ mod tests {
         assert!((editor.tempo_bpm() - 90.0).abs() < 0.01);
         assert_eq!(editor.session.project().tempo.points().count(), 1);
         assert_eq!(editor.session.undo_label(), Some("Edit tempo"));
+    }
+
+    #[test]
+    fn time_signature_and_bar_beat_position_are_editable() {
+        let mut editor = test_editor();
+        editor.set_time_signature(3, 4);
+        let signature = editor.time_signature();
+        assert_eq!(signature.numerator, 3);
+        assert_eq!(signature.denominator, 4);
+
+        editor.set_cursor_bar_beat(2, 2.0);
+        assert_eq!(editor.cursor_tick(), Tick::from_raw(4 * PPQ));
+
+        editor.set_cursor_bar_beat(1, 4.0);
+        assert_eq!(editor.cursor_tick(), Tick::from_raw(2 * PPQ));
     }
 
     #[test]
