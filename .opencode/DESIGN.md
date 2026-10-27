@@ -37,7 +37,7 @@ This is not a clone of an existing DAW. The core stays small; capability
 comes from three extension kinds:
 
 - in-tree devices (`dsp`),
-- CLAP plugins behind one `Device` abstraction,
+- plugin backends (VST3 first, CLAP later) behind one `Device` abstraction,
 - control/compile-time Lua that builds document data, operators, and device
   specs, but never runs on the audio thread.
 
@@ -499,13 +499,15 @@ concrete types are illustrative unless a boundary depends on them.
   or enum. Text and files are document references or plugin state.
 - `[CONFIRMED]` Scripting is control/compile-time Lua, never on the audio
   thread.
-- `[CONFIRMED]` Plugins are CLAP, behind the same `Device` abstraction as
-  in-tree devices. The plan drives devices through a transport-agnostic
-  `DeviceProcessor`; in-process is the default and process isolation is
-  another implementation of the same interface.
-- `[CONFIRMED]` Automation drives plugin parameters through sample-accurate
-  CLAP events; odaw modulators map to CLAP parameter modulation where the
-  plugin supports it.
+- `[CONFIRMED]` Plugin backends sit behind the same `Device` abstraction as
+  in-tree devices and are reached through a `DeviceFactory`. VST3 is the first
+  backend (`odaw-vst3`); CLAP can be added beside it without changing the
+  document, compiler, engine, or command layer. The plan drives devices through
+  a transport-agnostic `DeviceProcessor`; in-process is the default and process
+  isolation is another implementation of the same interface.
+- `[CONFIRMED]` Automation drives plugin parameters through the typed
+  parameter buffer. The VST3 backend forwards changed slots per block today;
+  sample-accurate plugin automation is the next depth step.
 - `[CONFIRMED]` Sections are reusable and referenced by the arrangement; an
   instance may be inactive. Loops are explicit timeline ranges. The renderer
   sees only the flattened arrangement.
@@ -675,7 +677,7 @@ tempo, markers and loop range.
 | `Decoder` / `Encoder` | runtime | File decode/encode (WAV, FLAC, and so on). |
 | `Resampler` | runtime | Sample-rate conversion: assets on import, master output at the platform edge. |
 | `Container` | runtime | Reads and writes `song.odaw/`. Crash-safe save: temp dir, fsync, atomic replace. |
-| `PluginHost` | runtime | Scans and instantiates CLAP plugins. Non-realtime load; devices cross into render. |
+| `PluginHost` | runtime | Scans and instantiates external plugins. Non-realtime load behind a `DeviceFactory`; devices cross into render. |
 | `ScriptHost` | runtime | Runs control/compile-time Lua. Never on the audio thread. |
 | `PeakCache` | runtime | Waveform pyramid for display. Disposable. |
 

@@ -14,10 +14,12 @@ use odaw_core::{
     Port, PortDirection, PortId, Project, TempoPoint, Tick, TimeSignature,
 };
 use odaw_dsp::{AudioAsset, AudioSources, demo};
+use odaw_engine::DeviceParameter;
 use odaw_engine::{RealtimeEngine, RealtimeHandle, RealtimeState, realtime};
 use odaw_format::Container;
 use odaw_platform::{AudioBackend, AudioCallback};
 use odaw_render::project_end_frame;
+use odaw_vst3::{Catalog, EditorWindow, Vst3Backend};
 
 const TRACK_LENGTH: i64 = 16 * PPQ;
 
@@ -37,6 +39,7 @@ pub struct Editor {
     audio_error: Option<String>,
     imported: HashMap<AssetId, ImportedAudio>,
     note_clipboard: Option<NoteClipboard>,
+    vst3: Vst3Backend,
 }
 
 #[derive(Clone, Debug)]
@@ -103,6 +106,7 @@ impl Editor {
             audio_error: None,
             imported: HashMap::new(),
             note_clipboard: None,
+            vst3: Vst3Backend::load_cached(),
         };
         editor.ensure_selection();
         editor.load_imported_assets();
@@ -306,7 +310,7 @@ impl Editor {
         let project = self.session.project();
         let sources = self.audio_sources();
         let (state, end_frame) =
-            prepare_state_at(project, frames_at(project, self.cursor), &sources)?;
+            self.prepare_state_at(project, frames_at(project, self.cursor), &sources)?;
         let sample_rate = state.engine.sample_rate();
         let channels = u16::try_from(state.engine.channels())
             .map_err(|_| "unsupported channel count".to_owned())?;
@@ -384,7 +388,7 @@ impl Editor {
         });
         let sources = self.audio_sources();
         let prepared = if needs_state {
-            match prepare_state_at(&project, cursor_frame, &sources) {
+            match self.prepare_state_at(&project, cursor_frame, &sources) {
                 Ok(state) => Some(state),
                 Err(error) => {
                     self.audio_error = Some(error);
@@ -465,10 +469,11 @@ impl Editor {
         let project = self.session.project().clone();
         let start = frames_at(&project, self.cursor);
         let sources = self.audio_sources();
+        let prepared = self.prepare_state_at(&project, start, &sources);
         let Some(audio) = &mut self.audio else {
             return;
         };
-        match prepare_state_at(&project, start, &sources) {
+        match prepared {
             Ok((state, end_frame)) => {
                 if let Err(error) = audio.handle.publish_at(state, start) {
                     self.audio_error = Some(error.to_string());
@@ -607,6 +612,179 @@ impl Editor {
             .map(|(id, _)| *id)
     }
 
+    pub fn plugin_entries(&self) -> &[odaw_vst3::PluginEntry] {
+        &self.vst3.catalog().entries
+    }
+
+    /// A project references VST3 devices but the cache is empty: the reference
+    /// can only render as a missing-plugin placeholder until a scan finishes.
+    pub fn needs_plugin_scan(&self) -> bool {
+        self.plugin_entries().is_empty()
+            && self.session.project().nodes.values().any(|node| {
+                node.kind
+                    .as_ref()
+                    .is_some_and(|kind| kind.as_str().starts_with("vst3:"))
+            })
+    }
+
+    pub fn apply_plugin_catalog(&mut self, catalog: Catalog) {
+        self.status = Some(format!("found {} plugin(s)", catalog.entries.len()));
+        self.vst3.set_catalog(catalog);
+        self.rebuild_audio();
+    }
+
+    pub fn plugin_parameters(&self, node: NodeId) -> Vec<DeviceParameter> {
+        self.vst3.parameters(node).unwrap_or_default()
+    }
+
+    pub fn plugin_parameter_text(&self, node: NodeId, param: &str, value: f64) -> Option<String> {
+        self.vst3.format_parameter(node, param, value)
+    }
+
+    pub fn open_plugin_editor(&self, node: NodeId) -> Result<EditorWindow, String> {
+        EditorWindow::open(&self.vst3, node)
+    }
+
+    pub fn plugin_window_is_current(&self, node: NodeId, window: &EditorWindow) -> bool {
+        self.vst3
+            .plugin(node)
+            .is_some_and(|plugin| window.is_for(&plugin))
+    }
+
+    pub fn add_plugin(&mut self, class_id: &str) -> bool {
+        let Some(entry) = self.vst3.catalog().get(class_id).cloned() else {
+            self.error = Some(format!("plugin {class_id} is not in the catalogue"));
+            return false;
+        };
+        let result = if entry.is_instrument() {
+            self.add_instrument_entry(&entry)
+        } else {
+            self.add_effect_entry(&entry)
+        };
+        match result {
+            Ok(Some(clip)) => {
+                self.selected_clip = Some(clip);
+                true
+            }
+            Ok(None) => true,
+            Err(error) => {
+                self.error = Some(error);
+                false
+            }
+        }
+    }
+
+    fn add_instrument_entry(
+        &mut self,
+        entry: &odaw_vst3::PluginEntry,
+    ) -> Result<Option<ClipId>, String> {
+        let project = self.session.project().clone();
+        let mut commands = Vec::new();
+        let (master, master_input) = ensure_master(&mut self.session, &project, &mut commands)?;
+        let track = self.session.next_node_id();
+        let plugin = self.session.next_node_id();
+        let clip = self.session.next_clip_id();
+        let edge = self.session.next_edge_id();
+        commands.push(Command::new(CommandKind::Node(NodeCommand::Add {
+            node: track,
+            value: Box::new(
+                Node::new(NodeRole::Track)
+                    .with_name(entry.name.clone())
+                    .with_color(track_color(track))
+                    .with_ports([
+                        Port::input(PortId::from_raw(0), ChannelLayout::Stereo),
+                        Port::output(PortId::from_raw(1), ChannelLayout::Stereo),
+                    ])
+                    .with_rack([plugin])
+                    .with_clips([clip]),
+            ),
+        })));
+        commands.push(Command::new(CommandKind::Node(NodeCommand::Add {
+            node: plugin,
+            value: Box::new(
+                Node::device(NodeKind::new(entry.kind()))
+                    .with_name(entry.name.clone())
+                    .with_ports([Port::output(PortId::from_raw(0), ChannelLayout::Stereo)]),
+            ),
+        })));
+        commands.push(Command::new(CommandKind::Clip(ClipCommand::Add {
+            clip,
+            value: Clip {
+                node: track,
+                start: Tick::ZERO,
+                length: Tick::from_raw(TRACK_LENGTH),
+                content: ClipContent::Midi {
+                    source_start: Tick::ZERO,
+                    source_length: Tick::from_raw(TRACK_LENGTH),
+                    notes: [].into_iter().collect(),
+                },
+            },
+        })));
+        commands.push(Command::new(CommandKind::Edge(EdgeCommand::Add {
+            edge,
+            value: Edge {
+                from: NodePort {
+                    node: track,
+                    port: PortId::from_raw(1),
+                },
+                to: NodePort {
+                    node: master,
+                    port: master_input,
+                },
+            },
+        })));
+        let result = self.session.apply_commands(commands, "Add VST3 instrument");
+        if !self.after_edit(result) {
+            return Err("the instrument was rejected".to_owned());
+        }
+        self.select_track(track);
+        self.status = Some(format!("added {}", entry.name));
+        Ok(Some(clip))
+    }
+
+    fn add_effect_entry(
+        &mut self,
+        entry: &odaw_vst3::PluginEntry,
+    ) -> Result<Option<ClipId>, String> {
+        let Some(track) = self.selected_track() else {
+            return Err("select a track before adding an effect".to_owned());
+        };
+        let project = self.session.project().clone();
+        let node = project
+            .nodes
+            .get(&track)
+            .ok_or_else(|| "the selected track no longer exists".to_owned())?;
+        if node.role != NodeRole::Track {
+            return Err("effects can only be added to tracks".to_owned());
+        }
+        let plugin = self.session.next_node_id();
+        let mut rack = node.rack.iter().copied().collect::<Vec<_>>();
+        rack.push(plugin);
+        let commands = vec![
+            Command::new(CommandKind::Node(NodeCommand::Add {
+                node: plugin,
+                value: Box::new(
+                    Node::device(NodeKind::new(entry.kind()))
+                        .with_name(entry.name.clone())
+                        .with_ports([
+                            Port::input(PortId::from_raw(0), ChannelLayout::Stereo),
+                            Port::output(PortId::from_raw(1), ChannelLayout::Stereo),
+                        ]),
+                ),
+            })),
+            Command::new(CommandKind::Node(NodeCommand::SetRack {
+                node: track,
+                rack,
+            })),
+        ];
+        let result = self.session.apply_commands(commands, "Add VST3 effect");
+        if !self.after_edit(result) {
+            return Err("the effect was rejected".to_owned());
+        }
+        self.status = Some(format!("added {}", entry.name));
+        Ok(None)
+    }
+
     pub fn param_value(&self, node: NodeId, param: &str) -> Option<f64> {
         let value = self
             .session
@@ -658,7 +836,8 @@ impl Editor {
             .path
             .clone()
             .unwrap_or_else(|| PathBuf::from(format!("{}.odaw", self.session.project().meta.name)));
-        match Container::new(&path).save(self.session.project()) {
+        let project = self.project_with_plugin_state(self.session.project());
+        match Container::new(&path).save(&project) {
             Ok(()) => {
                 self.path = Some(path.clone());
                 let assets = match self.store_audio_assets(&path) {
@@ -1623,10 +1802,11 @@ impl Editor {
         let project = self.session.project().clone();
         let start = frames_at(&project, self.cursor);
         let sources = self.audio_sources();
+        let prepared = self.prepare_state_at(&project, start, &sources);
         let Some(audio) = &mut self.audio else {
             return;
         };
-        match prepare_state_at(&project, start, &sources) {
+        match prepared {
             Ok((state, end_frame)) => {
                 if let Err(error) = audio.handle.publish_at(state, start) {
                     self.audio_error = Some(error.to_string());
@@ -1650,6 +1830,43 @@ impl Editor {
                 self.playing = false;
             }
         }
+        let live: BTreeSet<NodeId> = self.session.project().nodes.keys().copied().collect();
+        self.vst3.retain_nodes(&live);
+    }
+
+    fn prepare_state_at(
+        &self,
+        project: &Project,
+        start_frame: u64,
+        audio_sources: &AudioSources,
+    ) -> Result<(RealtimeState, u64), String> {
+        let project = self.project_with_plugin_state(project);
+        prepare_state_at(&project, start_frame, audio_sources, &self.vst3)
+    }
+
+    /// Patch live plugin state into a throwaway snapshot. The document keeps
+    /// its previous blob until the next save; rebuilds and seeks still restore
+    /// the current patch.
+    fn project_with_plugin_state(&self, project: &Project) -> Project {
+        let states = self.vst3.capture_states();
+        let parameters = self.vst3.capture_parameters();
+        if states.is_empty() && parameters.is_empty() {
+            return project.clone();
+        }
+        let mut project = project.clone();
+        for (id, state) in states {
+            if let Some(node) = project.nodes.get_mut(&id) {
+                node.state = Some(state.into());
+            }
+        }
+        for (id, values) in parameters {
+            if let Some(node) = project.nodes.get_mut(&id) {
+                for (param, value) in values {
+                    node.params.insert(param, value);
+                }
+            }
+        }
+        project
     }
 }
 
@@ -1665,8 +1882,12 @@ fn prepare_state_at(
     project: &Project,
     start_frame: u64,
     audio_sources: &AudioSources,
+    vst3: &Vst3Backend,
 ) -> Result<(RealtimeState, u64), String> {
+    let block_size = 8192;
     let compiled = Compiler::builtin()
+        .with_factory(vst3.factory())
+        .with_max_block_size(block_size)
         .compile_with_audio(project, audio_sources)
         .map_err(|error| error.to_string())?;
     let sample_rate = compiled.plan.sample_rate;
@@ -1676,12 +1897,44 @@ fn prepare_state_at(
     let state = RealtimeState::new_at(
         compiled,
         project,
-        NonZeroUsize::new(8192).expect("realtime block size is non-zero"),
+        NonZeroUsize::new(block_size).expect("realtime block size is non-zero"),
         Some(end_frame),
         start_frame,
     )
     .map_err(|error| error.to_string())?;
     Ok((state, end_frame))
+}
+
+fn track_color(id: NodeId) -> u32 {
+    TRACK_COLORS[(id.raw().saturating_sub(1) % TRACK_COLORS.len() as u64) as usize]
+}
+
+fn ensure_master(
+    session: &mut Session,
+    project: &Project,
+    commands: &mut Vec<Command>,
+) -> Result<(NodeId, PortId), String> {
+    if let Some((id, node)) = project
+        .nodes
+        .iter()
+        .find(|(_, node)| node.role == NodeRole::Master)
+    {
+        let port = node
+            .ports
+            .iter()
+            .find(|port| port.direction == PortDirection::Input)
+            .ok_or_else(|| "the master node has no input port".to_owned())?;
+        return Ok((*id, port.id));
+    }
+    let id = session.next_node_id();
+    commands.push(Command::new(CommandKind::Node(NodeCommand::Add {
+        node: id,
+        value: Box::new(Node::new(NodeRole::Master).with_ports([
+            Port::input(PortId::from_raw(0), ChannelLayout::Stereo),
+            Port::output(PortId::from_raw(1), ChannelLayout::Stereo),
+        ])),
+    })));
+    Ok((id, PortId::from_raw(0)))
 }
 
 pub fn add_track_commands(session: &mut Session) -> Result<(Vec<Command>, NodeId, ClipId), String> {
@@ -1843,7 +2096,35 @@ mod tests {
             audio_error: None,
             imported: HashMap::new(),
             note_clipboard: None,
+            vst3: Vst3Backend::new(Catalog::default()),
         }
+    }
+
+    #[test]
+    fn adding_an_installed_instrument_creates_a_track_and_clip() {
+        const DEXED: &str = "ABCDEF019182FAEB4447534244657864";
+        let catalog = Catalog::scan();
+        if catalog.get(DEXED).is_none() {
+            eprintln!("Dexed is not installed; skipping");
+            return;
+        }
+        let mut editor = test_editor();
+        editor.vst3 = Vst3Backend::new(catalog);
+        assert!(editor.add_plugin(DEXED));
+
+        let project = editor.session.project();
+        let track = project
+            .nodes
+            .iter()
+            .find(|(_, node)| node.role == NodeRole::Track && node.name.as_deref() == Some("Dexed"))
+            .map(|(id, _)| *id)
+            .expect("the instrument created a track");
+        let plugin = project.nodes[&track].rack[0];
+        assert_eq!(
+            project.nodes[&plugin].kind.as_ref().map(NodeKind::as_str),
+            Some(format!("vst3:{DEXED}").as_str())
+        );
+        assert_eq!(project.nodes[&track].clips.len(), 1);
     }
 
     #[test]

@@ -19,6 +19,7 @@ odaw-format = { path = "../../format" }
 odaw-io = { path = "../../io" }
 odaw-platform = { path = "../../platform" }
 odaw-render = { path = "../../render" }
+odaw-vst3 = { path = "../../vst3" }
 serde_json.workspace = true
 thiserror.workspace = true
 

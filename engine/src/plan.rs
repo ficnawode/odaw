@@ -1,6 +1,6 @@
 use std::fmt;
 
-use odaw_core::NodeId;
+use odaw_core::{NodeId, ParamId, ParamValue};
 
 use crate::meter::MeterBank;
 use crate::param::ParamBuffer;
@@ -34,6 +34,12 @@ pub struct CompiledProject {
 pub trait DeviceProcessor: fmt::Debug + Send {
     fn latency_frames(&self) -> u32 {
         0
+    }
+
+    /// Parameters this device wants present in the parameter buffer, including
+    /// their initial values. Document values are inserted first and win.
+    fn parameter_defaults(&self) -> Vec<(ParamId, ParamValue)> {
+        Vec::new()
     }
 
     fn process(&mut self, block: &mut Block<'_>);

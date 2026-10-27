@@ -1,0 +1,23 @@
+[package]
+name = "odaw-vst3"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+odaw-core = { path = "../core" }
+odaw-engine = { path = "../engine" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+vst3-host = { version = "0.10", default-features = false }
+
+[dev-dependencies]
+odaw-compile = { path = "../compile" }
+odaw-dsp = { path = "../dsp" }
+odaw-format = { path = "../format" }
+odaw-render = { path = "../render" }
+tempfile = "3"
+
+[lints]
+workspace = true

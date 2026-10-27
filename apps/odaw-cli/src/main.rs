@@ -15,7 +15,8 @@ use odaw_engine::{RealtimeEngine, RealtimeError, RealtimeState, RealtimeStateErr
 use odaw_format::{Container, ContainerError, ProjectFile};
 use odaw_io::{WavError, WavSpec, write_wav};
 use odaw_platform::{AudioBackend, AudioCallback, AudioError};
-use odaw_render::{RenderError, RenderOptions, project_end_frame, render_project_with_audio};
+use odaw_render::{RenderError, RenderOptions, project_end_frame, render_project_with_compiler};
+use odaw_vst3::{Catalog, Vst3Backend};
 use thiserror::Error;
 
 #[derive(Debug, Parser)]
@@ -77,6 +78,13 @@ enum Command {
     },
     /// Check that a project container loads and validates.
     Validate { path: PathBuf },
+    /// List installed VST3 plugins, scanning again with --refresh.
+    Plugins {
+        #[arg(long)]
+        refresh: bool,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -109,7 +117,41 @@ fn run() -> Result<(), CliError> {
         } => render_project_file(&path, &output, block_size, duration),
         Command::Play { path, duration } => play_project(&path, duration),
         Command::Validate { path } => validate_project(&path),
+        Command::Plugins { refresh, json } => list_plugins(refresh, json),
     }
+}
+
+fn list_plugins(refresh: bool, json: bool) -> Result<(), CliError> {
+    let catalog = if refresh {
+        let catalog = Catalog::scan();
+        catalog.save()?;
+        catalog
+    } else {
+        Catalog::load_or_empty()
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&catalog.entries)?);
+        return Ok(());
+    }
+    if catalog.entries.is_empty() {
+        println!("no VST3 plugins found; pass --refresh to scan");
+        return Ok(());
+    }
+    for entry in &catalog.entries {
+        println!(
+            "{}  {}  {}  [{}]  {}",
+            entry.kind(),
+            entry.name,
+            entry.vendor,
+            if entry.is_instrument() {
+                "instrument"
+            } else {
+                "effect"
+            },
+            entry.path.display()
+        );
+    }
+    Ok(())
 }
 
 fn create_project(
@@ -206,7 +248,7 @@ fn play_project(path: &Path, duration: Option<f64>) -> Result<(), CliError> {
     let project = container.load()?;
     let sources = load_audio_sources(container.root(), &project)?;
     let frames = render_frames(&project, duration)?;
-    let compiled = Compiler::builtin().compile_with_audio(&project, &sources)?;
+    let compiled = plugin_compiler(&project, 8192).compile_with_audio(&project, &sources)?;
     let sample_rate = compiled.plan.sample_rate;
     let channels = u16::try_from(compiled.plan.channels)
         .map_err(|_| CliError::UnsupportedChannels(compiled.plan.channels))?;
@@ -243,8 +285,12 @@ fn render_project_file(
     let project = container.load()?;
     let sources = load_audio_sources(container.root(), &project)?;
     let frames = render_frames(&project, duration)?;
-    let audio =
-        render_project_with_audio(&project, RenderOptions { block_size, frames }, &sources)?;
+    let audio = render_project_with_compiler(
+        &project,
+        RenderOptions { block_size, frames },
+        &sources,
+        &plugin_compiler(&project, block_size.get()),
+    )?;
     let channels =
         u16::try_from(audio.channels).map_err(|_| CliError::UnsupportedChannels(audio.channels))?;
 
@@ -273,6 +319,24 @@ fn render_project_file(
         output.display()
     );
     Ok(())
+}
+
+fn plugin_compiler(project: &Project, block_size: usize) -> Compiler {
+    let mut backend = Vst3Backend::load_cached();
+    let needs_scan = backend.catalog().entries.is_empty()
+        && project.nodes.values().any(|node| {
+            node.kind
+                .as_ref()
+                .is_some_and(|kind| kind.as_str().starts_with(odaw_vst3::KIND_PREFIX))
+        });
+    if needs_scan {
+        let catalog = Catalog::scan();
+        let _ = catalog.save();
+        backend.set_catalog(catalog);
+    }
+    Compiler::builtin()
+        .with_factory(backend.factory())
+        .with_max_block_size(block_size)
 }
 
 fn load_audio_sources(root: &Path, project: &Project) -> Result<AudioSources, CliError> {
@@ -381,4 +445,6 @@ enum CliError {
     },
     #[error("failed to encode JSON: {0}")]
     Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Catalog(#[from] odaw_vst3::catalog::CatalogError),
 }

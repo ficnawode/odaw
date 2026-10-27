@@ -20,8 +20,8 @@ depend on the render-plan and parameter contracts.
 | M4 UI shell and track selection | 6 | Native window, transport, track headers, timeline. **Done.** |
 | M5 Piano roll | 6-7 | MIDI editing and sample-accurate playback. **Done; depth work remains.** |
 | M6 Automation | 7 | Draw, record, and render parameter automation. |
-| M7 CLAP hosting | 8 | CLAP instruments and effects. |
-| M8 VST3 compatibility | 8b | VST3 behind the same device abstraction. |
+| M7 Plugin backends | 8 | VST3 first, then CLAP behind one device factory. |
+| M8 VST3 compatibility | 8 | VST3 instruments, effects, state, parameters, and editors. **First pass done.** |
 | M9 Release hardening | 9-11 | Scripting, performance, packaging. |
 
 ---
@@ -181,9 +181,11 @@ The document already stores lanes and keyframes.
 Acceptance: automate gain and a filter cutoff, hear it, undo a recording pass in
 one step, save/reopen, and render deterministically.
 
-## M7 — CLAP hosting
+## M7 — Plugin backends
 
-CLAP is the device ABI and should land before VST3.
+VST3 landed first (see M8) because it was the requested backend. CLAP can
+follow behind the same `DeviceFactory` boundary and must not fork the device
+interface.
 
 - Lazy, cached, deferrable plugin scan.
 - Load/prepare off the audio thread; hand off live instances atomically.
@@ -224,6 +226,19 @@ Acceptance: the CLAP acceptance test passes with a VST3 plugin, including state
 restore and sample-accurate automation. If the plugin pool demands it, VST3 can
 move ahead of CLAP, but the device interface must not fork.
 
+Implemented in this commit: `odaw-vst3` (MIT `vst3-host` behind
+`DeviceFactory`), filesystem scan with `moduleinfo.json` fast path and
+`~/.cache/odaw/vst3-plugins.json`, `odaw plugins`, normalized `param.<id>`
+parameters with change-tracked parameter-buffer updates, component/controller
+state capture and restore, note events, latency reporting plus per-edge PDC,
+missing-plugin pass-through placeholders, a generic parameter panel, a
+background plugin browser, instrument/effect insertion, and floating editor
+windows verified under XWayland.
+
+Remaining: instance retention across structural edits (currently state is
+re-instantiated), sample-accurate automation, multi-out/sidechain buses,
+process isolation, Windows/macOS bundles, and `.vstpreset` import/export.
+
 ## M9 — Release hardening
 
 - Lua control/compile-time scripting.
@@ -245,6 +260,6 @@ move ahead of CLAP, but the device interface must not fork.
 4. Add a velocity lane, quantize, and playhead follow to the piano roll.
 5. Add track grouping/folders and drag-to-reorder.
 6. Add automation editing.
-7. Add CLAP, then VST3.
+7. Add CLAP behind the same device factory, and instance retention for plugins.
 8. Add latency compensation, the master rate bridge, and support for
    parallel/sidechain device paths.

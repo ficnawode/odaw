@@ -11,9 +11,10 @@ truth for decisions; this file is only phase-level sequencing.
 - Every commit must leave the tree green: it builds, `cargo test` passes,
   and whatever already ran still runs. Later commits may show less, never
   broken.
-- Capability comes from three extension kinds: in-tree devices, CLAP
-  plugins, and control/compile-time Lua (never on the audio thread). The
-  core stays small. CLAP is the device ABI and is supported well.
+- Capability comes from three extension kinds: in-tree devices, plugin
+  backends, and control/compile-time Lua (never on the audio thread). The
+  core stays small. VST3 is the first plugin backend; CLAP can follow behind
+  the same `DeviceFactory`/`DeviceProcessor` boundary.
 - New capability starts as an extension. It only enters the core if the
   extension API itself needs it. Prefer composing primitives over adding a
   core type.
@@ -79,10 +80,11 @@ file when work starts.
 
 Goal: MIDI I/O, recording, modulators, and richer automation editing.
 
-## Phase 8 — Plugin hosting: CLAP (the device ABI)
+## Phase 8 — Plugin hosting: VST3 first, then CLAP
 
-Goal: support CLAP well enough that instruments, effects, and their
-automation are all in reach on a simple core.
+Goal: support external instruments, effects, state, and parameters on a
+simple core. VST3 lands first as `odaw-vst3`; CLAP reuses the same device
+boundary without forking the document or engine.
 
 ## Phase 9 — Lua scripting
 
@@ -122,6 +124,5 @@ them shape early decisions unless a decision would block them.
   on: audio-rate modulation inputs, a composite/container node with exposed
   parameters, and a voice/polyphony model (note routing, per-voice state,
   glide, unison, MPE). Needs its own design pass before it enters a phase.
-  Until then, polyphonic instruments come from CLAP.
-- **VST3/AU adapter** behind the same `Device` abstraction, if the CLAP-only
-  plugin pool proves too small.
+  Until then, polyphonic instruments come from a plugin backend.
+- **AU adapter** behind the same `Device` abstraction on macOS.

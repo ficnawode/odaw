@@ -5,6 +5,7 @@ use odaw_core::{ParamAddress, ParamValue};
 #[derive(Clone, Debug, Default)]
 pub struct ParamBuffer {
     slots: Vec<ParamValue>,
+    versions: Vec<u64>,
     index: BTreeMap<ParamAddress, usize>,
 }
 
@@ -19,6 +20,7 @@ impl ParamBuffer {
         }
         let slot = self.slots.len();
         self.slots.push(initial);
+        self.versions.push(0);
         self.index.insert(address, slot);
         slot
     }
@@ -27,8 +29,19 @@ impl ParamBuffer {
         let Some(slot) = self.index.get(address).copied() else {
             return false;
         };
+        if self.slots[slot] == value {
+            return true;
+        }
         self.slots[slot] = value;
+        self.versions[slot] = self.versions[slot].wrapping_add(1);
         true
+    }
+
+    /// Monotonic revision of one slot. Devices cache this per parameter and only
+    /// forward values whose revision moved, instead of comparing every value every
+    /// block (and without the audio thread having to clear a dirty set).
+    pub fn version(&self, slot: usize) -> Option<u64> {
+        self.versions.get(slot).copied()
     }
 
     pub fn get(&self, address: &ParamAddress) -> Option<ParamValue> {
@@ -87,5 +100,16 @@ mod tests {
         assert!(!buffer.set(&address("missing"), ParamValue::Float(1.0)));
         assert_eq!(buffer.float(&address("gain"), 0.0), 0.25);
         assert_eq!(buffer.float(&address("missing"), 0.75), 0.75);
+    }
+
+    #[test]
+    fn versions_only_move_when_a_value_changes() {
+        let mut buffer = ParamBuffer::new();
+        let slot = buffer.ensure(address("gain"), ParamValue::Float(0.5));
+        assert_eq!(buffer.version(slot), Some(0));
+        buffer.set(&address("gain"), ParamValue::Float(0.5));
+        assert_eq!(buffer.version(slot), Some(0));
+        buffer.set(&address("gain"), ParamValue::Float(0.75));
+        assert_eq!(buffer.version(slot), Some(1));
     }
 }

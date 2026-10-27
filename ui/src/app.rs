@@ -1,8 +1,11 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
 use eframe::egui::{self, Color32};
-use odaw_core::{ClipContent, Node, NodeId, NodeKind, PPQ, Tick};
+use odaw_core::{ClipContent, Node, NodeId, PPQ, ParamValue, Tick};
+use odaw_vst3::{Catalog, EditorWindow};
 
 use crate::editor::{Editor, TRACK_COLORS};
 use crate::mixer::MixerState;
@@ -20,6 +23,18 @@ pub struct OdawApp {
     rename: Option<RenameState>,
     tempo_edit: Option<f64>,
     time_dialog: Option<TimeDraft>,
+    plugin_browser_open: bool,
+    plugin_search: String,
+    plugin_filter: PluginFilter,
+    plugin_scan: Option<Receiver<Catalog>>,
+    plugin_windows: HashMap<NodeId, EditorWindow>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PluginFilter {
+    All,
+    Instruments,
+    Effects,
 }
 
 struct RenameState {
@@ -39,8 +54,10 @@ struct TimeDraft {
 impl OdawApp {
     pub fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>) -> Self {
         configure_style(&cc.egui_ctx);
-        Self {
-            editor: Editor::new(path),
+        let editor = Editor::new(path);
+        let needs_scan = editor.needs_plugin_scan();
+        let mut app = Self {
+            editor,
             piano_roll: PianoRollState::default(),
             piano_roll_open: true,
             track_options_open: false,
@@ -49,7 +66,29 @@ impl OdawApp {
             rename: None,
             tempo_edit: None,
             time_dialog: None,
+            plugin_browser_open: false,
+            plugin_search: String::new(),
+            plugin_filter: PluginFilter::All,
+            plugin_scan: None,
+            plugin_windows: HashMap::new(),
+        };
+        if needs_scan {
+            app.start_plugin_scan();
         }
+        app
+    }
+
+    fn start_plugin_scan(&mut self) {
+        if self.plugin_scan.is_some() {
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let catalog = Catalog::scan();
+            let _ = catalog.save();
+            let _ = sender.send(catalog);
+        });
+        self.plugin_scan = Some(receiver);
     }
 
     fn piano_roll_visible(&self) -> bool {
@@ -298,6 +337,12 @@ impl OdawApp {
                 self.piano_roll.clear();
                 self.timeline.clear();
             }
+            if ui.button("Plugins").clicked() {
+                self.plugin_browser_open = true;
+                if self.editor.plugin_entries().is_empty() {
+                    self.start_plugin_scan();
+                }
+            }
         });
     }
 
@@ -382,16 +427,208 @@ impl OdawApp {
 
         ui.separator();
         ui.label("Devices");
-        for device in &node.rack {
-            let kind = self
-                .editor
-                .session
-                .project()
-                .nodes
-                .get(device)
-                .and_then(|node| node.kind.as_ref())
-                .map_or("device", NodeKind::as_str);
-            ui.small(format!("• {kind}"));
+        let devices: Vec<NodeId> = node.rack.iter().copied().collect();
+        for device in devices {
+            let (kind, device_name) = self.editor.session.project().nodes.get(&device).map_or(
+                ("device".to_owned(), "Device".to_owned()),
+                |node| {
+                    (
+                        node.kind
+                            .as_ref()
+                            .map_or_else(|| "device".to_owned(), |kind| kind.as_str().to_owned()),
+                        node.name.clone().unwrap_or_else(|| "Device".to_owned()),
+                    )
+                },
+            );
+            let is_vst3 = kind.starts_with("vst3:");
+            let label = if is_vst3 {
+                format!("{device_name} (VST3)")
+            } else {
+                device_name
+            };
+            egui::CollapsingHeader::new(label)
+                .id_salt(("device", device.raw()))
+                .show(ui, |ui| {
+                    ui.small(&kind);
+                    if is_vst3 {
+                        ui.horizontal(|ui| {
+                            if ui.button("Open editor").clicked() {
+                                match self.editor.open_plugin_editor(device) {
+                                    Ok(window) => {
+                                        self.plugin_windows.insert(device, window);
+                                    }
+                                    Err(error) => self.editor.error = Some(error),
+                                }
+                            }
+                            if self.plugin_windows.contains_key(&device)
+                                && ui.button("Close editor").clicked()
+                            {
+                                if let Some(mut window) = self.plugin_windows.remove(&device) {
+                                    window.close();
+                                }
+                            }
+                        });
+                        let parameters = self.editor.plugin_parameters(device);
+                        if parameters.is_empty() {
+                            ui.small("parameters load once the plugin is live");
+                        } else {
+                            egui::ScrollArea::vertical()
+                                .max_height(260.0)
+                                .show(ui, |ui| {
+                                    for parameter in parameters {
+                                        let current = self
+                                            .editor
+                                            .param_value(device, parameter.id.as_str())
+                                            .unwrap_or_else(|| default_value(&parameter.default));
+                                        let mut value = current;
+                                        ui.horizontal(|ui| {
+                                            let response = ui.add(
+                                                egui::Slider::new(&mut value, 0.0..=1.0)
+                                                    .text(&parameter.label),
+                                            );
+                                            let text =
+                                                if response.changed() || response.hovered() {
+                                                    self.editor.plugin_parameter_text(
+                                                        device,
+                                                        parameter.id.as_str(),
+                                                        value,
+                                                    )
+                                                } else {
+                                                    None
+                                                }
+                                                .unwrap_or_else(|| parameter.format(value));
+                                            ui.small(text);
+                                            if response.changed() {
+                                                self.editor.preview_param(
+                                                    device,
+                                                    parameter.id.as_str(),
+                                                    value,
+                                                );
+                                            }
+                                            if response.drag_stopped() || response.lost_focus() {
+                                                self.editor.commit_param(
+                                                    device,
+                                                    parameter.id.as_str(),
+                                                    value,
+                                                );
+                                            }
+                                        });
+                                    }
+                                });
+                        }
+                    }
+                });
+        }
+    }
+
+    fn plugin_browser(&mut self, ctx: &egui::Context) {
+        if let Some(receiver) = &self.plugin_scan {
+            match receiver.try_recv() {
+                Ok(catalog) => {
+                    self.editor.apply_plugin_catalog(catalog);
+                    self.plugin_scan = None;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => self.plugin_scan = None,
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        if !self.plugin_browser_open {
+            return;
+        }
+        let mut open = self.plugin_browser_open;
+        egui::Window::new("Plugins")
+            .open(&mut open)
+            .default_width(520.0)
+            .default_height(420.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Search");
+                    ui.text_edit_singleline(&mut self.plugin_search);
+                    egui::ComboBox::from_id_salt("plugin_filter")
+                        .selected_text(match self.plugin_filter {
+                            PluginFilter::All => "All",
+                            PluginFilter::Instruments => "Instruments",
+                            PluginFilter::Effects => "Effects",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.plugin_filter, PluginFilter::All, "All");
+                            ui.selectable_value(
+                                &mut self.plugin_filter,
+                                PluginFilter::Instruments,
+                                "Instruments",
+                            );
+                            ui.selectable_value(
+                                &mut self.plugin_filter,
+                                PluginFilter::Effects,
+                                "Effects",
+                            );
+                        });
+                    if self.plugin_scan.is_some() {
+                        ui.spinner();
+                        ui.label("scanning");
+                    } else if ui.button("Rescan").clicked() {
+                        self.start_plugin_scan();
+                    }
+                });
+                ui.separator();
+                let entries: Vec<odaw_vst3::PluginEntry> = self
+                    .editor
+                    .plugin_entries()
+                    .iter()
+                    .filter(|entry| match self.plugin_filter {
+                        PluginFilter::All => true,
+                        PluginFilter::Instruments => entry.is_instrument(),
+                        PluginFilter::Effects => entry.is_effect(),
+                    })
+                    .filter(|entry| entry.matches(&self.plugin_search))
+                    .cloned()
+                    .collect();
+                if entries.is_empty() {
+                    ui.label("No plugins match. Use Rescan if you just installed one.");
+                }
+                egui::ScrollArea::vertical()
+                    .max_height(320.0)
+                    .show(ui, |ui| {
+                        for entry in entries {
+                            ui.horizontal(|ui| {
+                                ui.strong(&entry.name);
+                                ui.small(&entry.vendor);
+                                ui.small(if entry.is_instrument() {
+                                    "instrument"
+                                } else {
+                                    "effect"
+                                });
+                                let clicked = ui
+                                    .button(if entry.is_instrument() {
+                                        "Add instrument"
+                                    } else {
+                                        "Add effect"
+                                    })
+                                    .clicked();
+                                if clicked && self.editor.add_plugin(&entry.class_id) {
+                                    self.piano_roll.clear();
+                                    self.timeline.clear();
+                                }
+                            });
+                            ui.small(entry.path.display().to_string());
+                        }
+                    });
+            });
+        self.plugin_browser_open = open;
+    }
+
+    fn service_plugin_windows(&mut self) {
+        let mut closed = Vec::new();
+        for (node, window) in &self.plugin_windows {
+            window.service();
+            if !window.is_open() || !self.editor.plugin_window_is_current(*node, window) {
+                closed.push(*node);
+            }
+        }
+        for node in closed {
+            if let Some(mut window) = self.plugin_windows.remove(&node) {
+                window.close();
+            }
         }
     }
 
@@ -699,9 +936,27 @@ impl eframe::App for OdawApp {
 
         self.rename_window(ctx);
         self.time_window(ctx);
+        self.plugin_browser(ctx);
+        self.service_plugin_windows();
 
-        if self.editor.playing || self.mixer.active() {
+        if self.editor.playing
+            || self.mixer.active()
+            || self.plugin_scan.is_some()
+            || !self.plugin_windows.is_empty()
+        {
             ctx.request_repaint_after(Duration::from_millis(16));
+        }
+    }
+}
+
+impl Drop for OdawApp {
+    fn drop(&mut self) {
+        // Detach VST3 editors and destroy their native windows while the X
+        // connection is still alive. Relying on field-drop order (after the
+        // audio engine and main window) makes some plugin GUIs query a dead
+        // X window and terminate the process with a BadWindow error.
+        for (_, mut window) in self.plugin_windows.drain() {
+            window.close();
         }
     }
 }
@@ -741,6 +996,15 @@ fn track_color(node: &Node, id: NodeId) -> Color32 {
         TRACK_COLORS[(id.raw().saturating_sub(1) % TRACK_COLORS.len() as u64) as usize]
     });
     rgb(value)
+}
+
+fn default_value(value: &ParamValue) -> f64 {
+    match value {
+        ParamValue::Float(value) => *value,
+        ParamValue::Int(value) => *value as f64,
+        ParamValue::Bool(value) => f64::from(u8::from(*value)),
+        ParamValue::Enum(value) => f64::from(*value),
+    }
 }
 
 fn rgb(value: u32) -> Color32 {

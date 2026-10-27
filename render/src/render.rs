@@ -31,7 +31,16 @@ pub fn render_project_with_audio(
     options: RenderOptions,
     audio_sources: &AudioSources,
 ) -> Result<RenderedAudio, RenderError> {
-    let compiled = Compiler::builtin().compile_with_audio(project, audio_sources)?;
+    render_project_with_compiler(project, options, audio_sources, &Compiler::builtin())
+}
+
+pub fn render_project_with_compiler(
+    project: &Project,
+    options: RenderOptions,
+    audio_sources: &AudioSources,
+    compiler: &Compiler,
+) -> Result<RenderedAudio, RenderError> {
+    let compiled = compiler.compile_with_audio(project, audio_sources)?;
     let sample_rate = compiled.plan.sample_rate;
     let channels = compiled.plan.channels;
     let mut engine = Engine::new(compiled, options.block_size)?;

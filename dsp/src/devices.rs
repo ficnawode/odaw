@@ -162,6 +162,63 @@ impl DeviceProcessor for Silence {
     }
 }
 
+/// Compensating delay used by the compiler's latency equalisation.
+#[derive(Debug)]
+pub struct Delay {
+    frames: usize,
+    channels: usize,
+    buffer: Vec<f32>,
+    write: usize,
+    primed: usize,
+}
+
+impl Delay {
+    pub fn new(frames: usize, channels: usize) -> Self {
+        let frames = frames.max(1);
+        let channels = channels.max(1);
+        Self {
+            frames,
+            channels,
+            buffer: vec![0.0; frames * channels],
+            write: 0,
+            primed: 0,
+        }
+    }
+}
+
+impl DeviceProcessor for Delay {
+    fn latency_frames(&self) -> u32 {
+        u32::try_from(self.frames).unwrap_or(u32::MAX)
+    }
+
+    fn process(&mut self, block: &mut Block<'_>) {
+        let channels = block.channels;
+        if channels == 0 || self.channels != channels {
+            block.output.fill(0.0);
+            return;
+        }
+        for frame in 0..block.frames {
+            let read = self.write * channels;
+            let write = read;
+            for channel in 0..channels {
+                let input = block.input[frame * channels + channel];
+                let delayed = self.buffer[read + channel];
+                self.buffer[write + channel] = input;
+                block.output[frame * channels + channel] = if self.primed >= self.frames {
+                    delayed
+                } else {
+                    0.0
+                };
+            }
+            self.write += 1;
+            if self.write == self.frames {
+                self.write = 0;
+            }
+            self.primed = self.primed.saturating_add(1);
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct PassThrough;
 
@@ -517,6 +574,30 @@ mod tests {
         };
         ChannelStrip::new(node).process(&mut block);
         assert_eq!(output, input);
+    }
+
+    #[test]
+    fn delay_holds_samples_for_its_latency() {
+        let node = NodeId::from_raw(1);
+        let params = ParamBuffer::new();
+        let mut delay = Delay::new(2, 1);
+        let input = vec![1.0, 2.0, 3.0, 4.0];
+        let mut output = output_buffer(4, 1);
+        let mut block = Block {
+            node,
+            sample_rate: 48_000,
+            channels: 1,
+            start_frame: 0,
+            frames: 4,
+            input: &input,
+            output: &mut output,
+            params: &params,
+            event_target: None,
+            events: &[],
+        };
+        delay.process(&mut block);
+        assert_eq!(output, vec![0.0, 0.0, 1.0, 2.0]);
+        assert_eq!(delay.latency_frames(), 2);
     }
 
     #[test]

@@ -38,8 +38,15 @@ What works today:
   handoff.
 - `odaw-dsp`: primitive in-tree devices (`builtin.sine`, `builtin.poly`,
   `builtin.gain`, `builtin.pass`), an audio-clip player with linear resampling,
-  a built-in track/master channel strip with dB gain and stereo pan, and a demo
-  song.
+  a built-in track/master channel strip with dB gain and stereo pan, a
+  latency-compensation delay, and a demo song.
+- `odaw-vst3`: a VST3 backend behind the `DeviceFactory`/`DeviceProcessor`
+  boundary. It scans standard Linux bundles into a cache, loads instruments and
+  effects, maps `param.<id>` normalized parameters into `Node.params`, saves
+  component/controller state into `Node.state`, forwards note events, reports
+  latency for compensation, and opens standalone X11/XWayland editor windows.
+  `vst3-host` is MIT-licensed and ships its own bindings, so no VST3 SDK code is
+  linked into the tree.
 - `odaw-compile`: rack flattening, deterministic DAG ordering, cycle detection,
   port/channel checks, and plan construction.
 - `odaw-render`: deterministic offline rendering.
@@ -66,17 +73,23 @@ What works today:
   clips, devices) in both cases. Edits go through `Session`; structural edits
   are recompiled and published to the realtime engine, while fader gestures
   update the live parameter buffer and commit one value-only command on
-  release.
-- `odaw`: a CLI for create, inspect, rename, demo, validate, render, and play.
+  release. A plugin browser scans VST3 bundles in the background; an instrument
+  is added as a new track and an effect is appended to the selected track's
+  rack. VST3 devices expose a generic normalized parameter panel and a floating
+  editor window.
+- `odaw`: a CLI for create, inspect, rename, demo, validate, render, play, and
+  VST3 discovery.
 - CI: formatting, clippy with warnings denied, and the workspace test suite.
 
-Current limits: mono/stereo only, in-tree devices must live in a rack, devices
-with latency are rejected until compensation lands, the output device must
-support the project sample rate directly, audio clips are not time-stretched
-when the tempo changes, MIDI notes are not recorded from hardware, track
-grouping is not implemented, there is no file dialog, no velocity lane, no loop
-transport, and no automation or plugin UI. Note group copy/paste stays within
-the selected MIDI clip.
+Current limits: mono/stereo only, devices must live in a rack, the output
+device must support the project sample rate directly, audio clips are not
+time-stretched when the tempo changes, MIDI notes are not recorded from
+hardware, track grouping is not implemented, there is no file dialog, no
+velocity lane, no loop transport, and no parameter automation editing. Note
+group copy/paste stays within the selected MIDI clip. VST3 support is
+first-pass: one main audio input/output bus, block-accurate parameters, no
+instance retention across structural edits (state is captured and restored),
+no process isolation, and editor windows are floating X11/XWayland windows.
 
 See [ROADMAP.md](ROADMAP.md) for the product path and
 [.opencode/DESIGN.md](.opencode/DESIGN.md) for the architecture.
@@ -101,6 +114,8 @@ cargo run -p odaw-cli -- render demo.odaw -o demo.wav --duration 2
 cargo run -p odaw-cli -- play demo.odaw
 cargo run -p odaw-app -- demo.odaw
 cargo run -p odaw-cli -- validate song.odaw
+cargo run -p odaw-cli -- plugins --refresh
+cargo run -p odaw-cli -- plugins --json
 ```
 
 A container is a directory:
@@ -128,6 +143,7 @@ render/           offline renderer
 platform/         cpal audio backend
 format/           versioned DTOs, migrations, container I/O
 control/          commands, staging, dispatch, history, operators, selection
+vst3/             VST3 device factory, scan cache, processor, editor windows
 ui/               egui application shell, timeline, piano roll
 apps/odaw-cli/    headless CLI
 apps/odaw-app/    native app
@@ -142,3 +158,4 @@ added when their phase starts, so the tree never carries empty placeholders.
 - [.opencode/LTPLAN.md](.opencode/LTPLAN.md) — phase sequencing.
 - [.opencode/CODING_GUIDELINES.md](.opencode/CODING_GUIDELINES.md) — how code
   is written.
+- [docs/VST3.md](docs/VST3.md) — VST3 backend boundaries, mapping, and limits.

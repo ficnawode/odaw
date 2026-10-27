@@ -7,11 +7,12 @@ use odaw_core::{
     ParamValue, Port, PortDirection, PortId, Project, TempoError, Tick, ValidationError,
 };
 use odaw_dsp::{
-    AudioClipPlayer, AudioSources, ChannelStrip, NodeRegistry, PlayableClip, STRIP_GAIN_PARAM,
-    STRIP_PAN_PARAM, Silence,
+    AudioClipPlayer, AudioSources, ChannelStrip, Delay, NodeRegistry, PlayableClip,
+    STRIP_GAIN_PARAM, STRIP_PAN_PARAM, Silence,
 };
 use odaw_engine::{
-    BufferId, CompiledProject, DeviceProcessor, MeterBank, ParamBuffer, PlanStep, RenderPlan,
+    BufferId, CompiledProject, DeviceContext, DeviceFactory, DeviceProcessor, MeterBank,
+    ParamBuffer, PlanStep, RenderPlan,
 };
 use thiserror::Error;
 
@@ -26,15 +27,34 @@ struct Unit {
 
 pub struct Compiler {
     registry: NodeRegistry,
+    factories: Vec<Box<dyn DeviceFactory>>,
+    max_block_size: usize,
 }
 
 impl Compiler {
     pub fn new(registry: NodeRegistry) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            factories: Vec::new(),
+            max_block_size: 8192,
+        }
     }
 
     pub fn builtin() -> Self {
         Self::new(NodeRegistry::builtin())
+    }
+
+    /// Add a device backend. Factories are consulted in registration order, then
+    /// the compiler falls back to built-in devices.
+    pub fn with_factory(mut self, factory: impl DeviceFactory + 'static) -> Self {
+        self.factories.push(Box::new(factory));
+        self
+    }
+
+    /// Maximum frames the host engine may ask a plugin to process in one block.
+    pub fn with_max_block_size(mut self, frames: usize) -> Self {
+        self.max_block_size = frames.max(1);
+        self
     }
 
     pub fn compile(&self, project: &Project) -> Result<CompiledProject, CompileError> {
@@ -42,6 +62,14 @@ impl Compiler {
     }
 
     pub fn compile_with_audio(
+        &self,
+        project: &Project,
+        audio_sources: &AudioSources,
+    ) -> Result<CompiledProject, CompileError> {
+        self.compile_project(project, audio_sources)
+    }
+
+    fn compile_project(
         &self,
         project: &Project,
         audio_sources: &AudioSources,
@@ -64,6 +92,9 @@ impl Compiler {
             .ok_or(CompileError::MissingNode(master))?;
         let master_layout = master_layout(master, master_node)?;
         let channels = usize::from(master_layout.channels());
+        let tempo_bpm = project.tempo.points().next().map_or(120.0, |point| {
+            60_000_000.0 / f64::from(point.micros_per_quarter.max(1))
+        });
         if !matches!(channels, 1 | 2) {
             return Err(CompileError::UnsupportedChannels(master_layout.channels()));
         }
@@ -157,18 +188,45 @@ impl Compiler {
                     .kind
                     .as_ref()
                     .ok_or(CompileError::MissingKind(*device))?;
-                let processor = self.registry.build(kind, *device).ok_or_else(|| {
-                    CompileError::UnknownDevice {
-                        node: *device,
-                        kind: kind.clone(),
+                let context = DeviceContext::new(
+                    *device,
+                    project.meta.sample_rate,
+                    self.max_block_size,
+                    channels,
+                    tempo_bpm,
+                );
+                let mut backend_error = None;
+                let mut processor = None;
+                for factory in &self.factories {
+                    if factory.descriptor(kind).is_none() {
+                        continue;
                     }
-                })?;
-                if processor.latency_frames() != 0 {
-                    return Err(CompileError::LatencyUnsupported {
-                        node: *device,
-                        latency: processor.latency_frames(),
-                    });
+                    match factory.build(device_node, &context) {
+                        Ok(built) => {
+                            processor = Some(built);
+                            break;
+                        }
+                        Err(error) => {
+                            backend_error = Some(error);
+                            break;
+                        }
+                    }
                 }
+                let processor = match processor {
+                    Some(processor) => processor,
+                    None => self.registry.build(kind, *device).ok_or_else(|| {
+                        backend_error.map_or_else(
+                            || CompileError::UnknownDevice {
+                                node: *device,
+                                kind: kind.clone(),
+                            },
+                            |error| CompileError::Device {
+                                node: *device,
+                                message: error.to_string(),
+                            },
+                        )
+                    })?,
+                };
 
                 let input = single_port(*device, device_node, PortDirection::Input)?;
                 let output = single_port(*device, device_node, PortDirection::Output)?
@@ -317,6 +375,8 @@ impl Compiler {
             units[to_unit].dependencies.push(from_unit);
         }
 
+        compensate_latency(&mut units, channels)?;
+
         let order = topological_order(&units)?;
         let mut unit_buffer = vec![0usize; units.len()];
         for (position, unit) in order.iter().copied().enumerate() {
@@ -362,9 +422,23 @@ impl Compiler {
                 );
             }
         }
+        // Devices report their parameters after construction (plugins discover
+        // them at load time), so every slot a live device may touch exists even
+        // when the document never stored a value for it. Document values win
+        // because they were inserted first.
+        for step in &steps {
+            for (param, value) in step.processor.parameter_defaults() {
+                params.ensure(
+                    ParamAddress {
+                        node: step.node,
+                        param,
+                    },
+                    value,
+                );
+            }
+        }
         // Reserve channel-strip slots for every mixer owner so live fader
-        // gestures always have somewhere to land. Document values win because
-        // they were inserted first.
+        // gestures always have somewhere to land.
         for owner in &owners {
             for param in [STRIP_GAIN_PARAM, STRIP_PAN_PARAM] {
                 params.ensure(
@@ -438,6 +512,60 @@ fn check_channel(node_id: NodeId, port: &Port, channels: usize) -> Result<(), Co
     Ok(())
 }
 
+/// Insert delays on parallel branches so every input to a unit arrives with the
+/// same latency. The master's own accumulated latency becomes the session's
+/// overall output delay, which the transport does not try to hide.
+fn compensate_latency(units: &mut Vec<Unit>, channels: usize) -> Result<(), CompileError> {
+    let order = topological_order(units)?;
+    let mut latency = vec![0u32; units.len()];
+    for unit_id in order {
+        let dependencies = units[unit_id].dependencies.clone();
+        let mut max_dependency_latency = 0u32;
+        for dependency in &dependencies {
+            let value = *latency
+                .get(*dependency)
+                .ok_or(CompileError::MissingDependency)?;
+            max_dependency_latency = max_dependency_latency.max(value);
+        }
+
+        let mut compensated = Vec::with_capacity(dependencies.len());
+        for dependency in dependencies {
+            let difference = max_dependency_latency - latency[dependency];
+            if difference == 0 {
+                compensated.push(dependency);
+                continue;
+            }
+            let delay_id = units.len();
+            units.push(Unit {
+                node: units[unit_id].node,
+                event_target: None,
+                processor: Some(Box::new(Delay::new(
+                    usize::try_from(difference).map_err(|_| CompileError::LatencyTooLarge {
+                        latency: difference,
+                    })?,
+                    channels,
+                ))),
+                dependencies: vec![dependency],
+            });
+            latency.push(max_dependency_latency);
+            compensated.push(delay_id);
+        }
+
+        units[unit_id].dependencies = compensated;
+        let own = units[unit_id]
+            .processor
+            .as_ref()
+            .map_or(0, |processor| processor.latency_frames());
+        latency[unit_id] =
+            max_dependency_latency
+                .checked_add(own)
+                .ok_or(CompileError::LatencyTooLarge {
+                    latency: max_dependency_latency,
+                })?;
+    }
+    Ok(())
+}
+
 fn topological_order(units: &[Unit]) -> Result<Vec<UnitId>, CompileError> {
     let mut indegree = vec![0usize; units.len()];
     let mut dependents: Vec<Vec<UnitId>> = vec![Vec::new(); units.len()];
@@ -501,6 +629,10 @@ pub enum CompileError {
     MissingKind(NodeId),
     #[error("node {node} references unknown device kind {kind}")]
     UnknownDevice { node: NodeId, kind: NodeKind },
+    #[error("node {node} could not be built: {message}")]
+    Device { node: NodeId, message: String },
+    #[error("device latency {latency} frames is too large to compensate")]
+    LatencyTooLarge { latency: u32 },
     #[error("node {node} has more than one {direction:?} port")]
     AmbiguousPorts {
         node: NodeId,
@@ -528,8 +660,6 @@ pub enum CompileError {
         node: NodeId,
         port: PortId,
     },
-    #[error("device {node} reports {latency} frames of latency, which is not compensated yet")]
-    LatencyUnsupported { node: NodeId, latency: u32 },
     #[error("the signal graph contains a cycle")]
     Cycle,
     #[error("a unit depends on a unit that does not exist")]
@@ -544,6 +674,51 @@ mod tests {
         ParamValue, Port, PortId, Project,
     };
     use odaw_dsp::demo;
+    use odaw_engine::{Block, DeviceContext, DeviceFactory};
+
+    #[derive(Debug, Default)]
+    struct LatencyPass {
+        previous: Vec<f32>,
+    }
+
+    impl DeviceProcessor for LatencyPass {
+        fn latency_frames(&self) -> u32 {
+            1
+        }
+
+        fn process(&mut self, block: &mut Block<'_>) {
+            self.previous.resize(block.channels, 0.0);
+            for frame in 0..block.frames {
+                for channel in 0..block.channels {
+                    let index = frame * block.channels + channel;
+                    block.output[index] = self.previous[channel];
+                    self.previous[channel] = block.input[index];
+                }
+            }
+        }
+    }
+
+    struct LatencyFactory;
+
+    impl DeviceFactory for LatencyFactory {
+        fn descriptor(&self, kind: &NodeKind) -> Option<odaw_engine::DeviceDescriptor> {
+            (kind.as_str() == "test.latency").then(|| odaw_engine::DeviceDescriptor {
+                kind: kind.clone(),
+                label: "Latency".to_owned(),
+                vendor: "test".to_owned(),
+                instrument: false,
+                parameters: Vec::new(),
+            })
+        }
+
+        fn build(
+            &self,
+            _node: &Node,
+            _context: &DeviceContext,
+        ) -> Result<Box<dyn DeviceProcessor>, odaw_engine::DeviceError> {
+            Ok(Box::new(LatencyPass::default()))
+        }
+    }
 
     fn compile(project: &Project) -> Result<CompiledProject, CompileError> {
         Compiler::builtin().compile(project)
@@ -898,6 +1073,73 @@ mod tests {
             compile(&project),
             Err(CompileError::UnsupportedRole { .. })
         ));
+    }
+
+    #[test]
+    fn parallel_paths_are_latency_compensated() {
+        use odaw_engine::Engine;
+
+        let mut project = Project::empty("latency", 48_000, 0).unwrap();
+        let (master_id, master_node) = master(1);
+        project.nodes.insert(master_id, master_node);
+
+        let first = NodeId::from_raw(2);
+        let first_sine = NodeId::from_raw(3);
+        let latency = NodeId::from_raw(4);
+        project.nodes.insert(
+            first,
+            Node::new(NodeRole::Track)
+                .with_ports([
+                    Port::input(PortId::from_raw(0), ChannelLayout::Stereo),
+                    Port::output(PortId::from_raw(1), ChannelLayout::Stereo),
+                ])
+                .with_rack([first_sine, latency]),
+        );
+        project.nodes.insert(
+            first_sine,
+            Node::device(NodeKind::new("builtin.sine"))
+                .with_ports([Port::output(PortId::from_raw(0), ChannelLayout::Stereo)])
+                .with_param(ParamId::new("frequency"), ParamValue::Float(12_000.0))
+                .with_param(ParamId::new("gain"), ParamValue::Float(1.0)),
+        );
+        project.nodes.insert(
+            latency,
+            Node::device(NodeKind::new("test.latency")).with_ports([
+                Port::input(PortId::from_raw(0), ChannelLayout::Stereo),
+                Port::output(PortId::from_raw(1), ChannelLayout::Stereo),
+            ]),
+        );
+
+        let second = NodeId::from_raw(5);
+        let second_sine = NodeId::from_raw(6);
+        project.nodes.insert(
+            second,
+            Node::new(NodeRole::Track)
+                .with_ports([
+                    Port::input(PortId::from_raw(0), ChannelLayout::Stereo),
+                    Port::output(PortId::from_raw(1), ChannelLayout::Stereo),
+                ])
+                .with_rack([second_sine]),
+        );
+        project.nodes.insert(
+            second_sine,
+            Node::device(NodeKind::new("builtin.sine"))
+                .with_ports([Port::output(PortId::from_raw(0), ChannelLayout::Stereo)])
+                .with_param(ParamId::new("frequency"), ParamValue::Float(12_000.0))
+                .with_param(ParamId::new("gain"), ParamValue::Float(1.0)),
+        );
+        connect(&mut project, 7, first, master_id);
+        connect(&mut project, 8, second, master_id);
+
+        let compiled = Compiler::builtin()
+            .with_factory(LatencyFactory)
+            .compile(&project)
+            .unwrap();
+        let mut engine = Engine::new(compiled, std::num::NonZeroUsize::new(4).unwrap()).unwrap();
+        let mut output = vec![0.0; 8];
+        engine.process_block(4, &[], &mut output).unwrap();
+        assert!((output[4] - 2.0).abs() < 1e-6, "{output:?}");
+        assert!((output[5] - 2.0).abs() < 1e-6, "{output:?}");
     }
 
     #[test]
