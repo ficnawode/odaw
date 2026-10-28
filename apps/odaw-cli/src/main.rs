@@ -19,6 +19,8 @@ use odaw_render::{RenderError, RenderOptions, project_end_frame, render_project_
 use odaw_vst3::{Catalog, Vst3Backend};
 use thiserror::Error;
 
+mod dexed_demo;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "odaw",
@@ -54,6 +56,12 @@ enum Command {
     Rename { path: PathBuf, name: String },
     /// Create a demo project with a sine instrument and gain stage.
     Demo {
+        path: PathBuf,
+        #[arg(long)]
+        force: bool,
+    },
+    /// Create a layered Dexed project playing Ode to Joy, with reverb sends.
+    DemoDexed {
         path: PathBuf,
         #[arg(long)]
         force: bool,
@@ -109,6 +117,9 @@ fn run() -> Result<(), CliError> {
         Command::Inspect { path, json } => inspect_project(&path, json),
         Command::Rename { path, name } => rename_project(&path, &name),
         Command::Demo { path, force } => create_demo(&path, force),
+        Command::DemoDexed { path, force } => {
+            dexed_demo::create(&path, force).map_err(CliError::Demo)
+        }
         Command::Render {
             path,
             output,
@@ -447,4 +458,6 @@ enum CliError {
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Catalog(#[from] odaw_vst3::catalog::CatalogError),
+    #[error("{0}")]
+    Demo(String),
 }

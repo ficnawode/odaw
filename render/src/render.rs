@@ -54,7 +54,10 @@ pub fn render_project_with_compiler(
     let mut samples = vec![0.0; sample_count];
 
     let block_size = options.block_size.get();
-    let mut events = Vec::new();
+    // Offline rendering has no realtime allocation rule, and a dense arrangement
+    // can put many simultaneous note events in one block. The scheduler drops
+    // events once the buffer is at capacity, so give it room up front.
+    let mut events = Vec::with_capacity(4096);
     let mut offset = 0usize;
     while offset < total {
         let frames = (total - offset).min(block_size);

@@ -90,7 +90,7 @@ pub fn realtime(state: RealtimeState, capacity: usize) -> (RealtimeEngine, Realt
         state: Some(state),
         pending_retired: None,
         playing: false,
-        events: Vec::with_capacity(1024),
+        events: Vec::with_capacity(4096),
         position: Arc::clone(&position),
         finished: Arc::clone(&finished),
     };

@@ -119,6 +119,27 @@ embedding is out of scope. The bundled spike is:
 cargo run -p odaw-vst3 --example editor_spike
 ```
 
+## Example project
+
+`examples/ode-to-joy.odaw` is a five-track Dexed arrangement of Ode to Joy:
+
+- Lead — PHAROH Dexed program, Hall reverb;
+- Harmony — diatonic third below the lead, Hall reverb;
+- Bass — RUMBLE 1 playing the chord roots;
+- Pad — Slow3D Pad playing sustained triads, Plate reverb;
+- Arp — ARP 2600 playing eighth-note chord figures, Plate reverb.
+
+It is 16 bars at 120 BPM with a loop region and two markers. Regenerate it from
+the installed catalogue with:
+
+```sh
+cargo run -p odaw-cli -- demo-dexed examples/ode-to-joy.odaw
+cargo run -p odaw-cli -- render examples/ode-to-joy.odaw -o ode.wav
+```
+
+Program choices are written into each Dexed `Node.state`, so the patch survives
+a reload even though the preset index is not a normal parameter.
+
 ## Testing
 
 With Dexed installed in `~/.vst3`:
