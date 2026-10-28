@@ -11,7 +11,11 @@ use crate::mixer::MixerState;
 use crate::piano_roll::SnapSettings;
 
 const ROW_HEIGHT: f32 = 58.0;
-const HEADER_WIDTH: f32 = 215.0;
+const HEADER_MIN_WIDTH: f32 = 240.0;
+const HEADER_DEFAULT_WIDTH: f32 = 285.0;
+const HEADER_MAX_WIDTH: f32 = 520.0;
+const MIN_ZOOM: f32 = 0.01;
+const MAX_ZOOM: f32 = 4096.0;
 const RULER_HEIGHT: f32 = 24.0;
 
 #[derive(Clone, Debug)]
@@ -72,6 +76,7 @@ impl EmptyDrag {
 #[derive(Debug)]
 pub struct TimelineState {
     pub pixels_per_beat: f32,
+    pub header_width: f32,
     pub(crate) snap: SnapSettings,
     drag: Option<ClipDrag>,
     marquee: Option<EmptyDrag>,
@@ -86,6 +91,7 @@ impl Default for TimelineState {
     fn default() -> Self {
         Self {
             pixels_per_beat: 84.0,
+            header_width: HEADER_DEFAULT_WIDTH,
             snap: SnapSettings::at_zoom(84.0),
             drag: None,
             marquee: None,
@@ -114,12 +120,20 @@ pub fn show(
     mixer: &mut MixerState,
     state: &mut TimelineState,
 ) {
+    if ui.rect_contains_pointer(ui.max_rect()) {
+        let factor = zoom_factor(ui);
+        if (factor - 1.0).abs() > 0.001 {
+            state.pixels_per_beat = (state.pixels_per_beat * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+            ui.ctx().request_repaint();
+        }
+    }
     state.snap.update_zoom(state.pixels_per_beat);
     let project = editor.session.project().clone();
     let tracks = track_rows(&project, editor);
     let master = master_node(&project);
     let selected_track = editor.selected_track();
     let selected_clips = editor.selected_clips();
+    let mut fit_requested = false;
 
     ui.horizontal_wrapped(|ui| {
         if ui.button("+ Track").clicked() {
@@ -135,10 +149,17 @@ pub fn show(
         ui.separator();
         ui.label("Zoom");
         ui.add(
-            egui::Slider::new(&mut state.pixels_per_beat, 16.0..=4096.0)
+            egui::Slider::new(&mut state.pixels_per_beat, MIN_ZOOM..=MAX_ZOOM)
                 .logarithmic(true)
                 .show_value(false),
         );
+        if ui
+            .button("Fit")
+            .on_hover_text("Fit the whole song in the timeline")
+            .clicked()
+        {
+            fit_requested = true;
+        }
         ui.separator();
         ui.checkbox(&mut state.snap.enabled, "Snap")
             .on_hover_text("Turn grid snapping on or off");
@@ -161,7 +182,12 @@ pub fn show(
         .iter()
         .next()
         .map_or(4, |signature| signature.numerator.max(1) as i64);
-    let viewport_width = (ui.available_width() - HEADER_WIDTH - 18.0).max(320.0);
+    let viewport_width = (ui.available_width() - state.header_width - 24.0).max(120.0);
+    if fit_requested {
+        state.pixels_per_beat =
+            (viewport_width / total_beats.max(1) as f32).clamp(MIN_ZOOM, MAX_ZOOM);
+        state.snap.update_zoom(state.pixels_per_beat);
+    }
     let content_width = (total_beats as f32 * state.pixels_per_beat).max(viewport_width);
     let row_count = tracks.len() + usize::from(master.is_some());
     let grid_height = (RULER_HEIGHT + row_count.max(1) as f32 * ROW_HEIGHT)
@@ -172,6 +198,7 @@ pub fn show(
             ui.spacing_mut().item_spacing.y = 0.0;
             header_row(
                 ui,
+                state.header_width,
                 RULER_HEIGHT,
                 Layout::left_to_right(Align::Center),
                 |ui| {
@@ -190,9 +217,25 @@ pub fn show(
                 );
             }
             if let Some(master) = master {
-                master_header(ui, editor, mixer, master);
+                master_header(ui, editor, mixer, master, state.header_width);
             }
         });
+
+        let (splitter, response) =
+            ui.allocate_exact_size(vec2(6.0, grid_height), Sense::click_and_drag());
+        let response = response.on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+        if response.hovered() || response.dragged() {
+            ui.painter().rect_filled(
+                splitter,
+                0.0,
+                Color32::from_rgba_unmultiplied(112, 178, 255, 90),
+            );
+        }
+        if response.dragged() {
+            let delta = ui.input(|input| input.pointer.delta().x);
+            state.header_width =
+                (state.header_width + delta).clamp(HEADER_MIN_WIDTH, HEADER_MAX_WIDTH);
+        }
 
         egui::ScrollArea::horizontal()
             .id_salt("timeline_grid")
@@ -272,30 +315,6 @@ pub fn show(
                     state.hover_target = track.zip(tick);
                 } else {
                     state.hover_target = None;
-                }
-
-                if response.hovered() {
-                    let zoom = ui.input(|input| input.zoom_delta());
-                    let ctrl_scroll = ui.input(|input| {
-                        if input.modifiers.command {
-                            input.raw_scroll_delta.y
-                        } else {
-                            0.0
-                        }
-                    });
-                    let factor = if (zoom - 1.0).abs() > 0.001 {
-                        zoom
-                    } else if ctrl_scroll.abs() > 0.0 {
-                        (ctrl_scroll * 0.01).exp()
-                    } else {
-                        1.0
-                    };
-                    if (factor - 1.0).abs() > 0.001 {
-                        state.pixels_per_beat =
-                            (state.pixels_per_beat * factor).clamp(16.0, 4096.0);
-                        state.snap.update_zoom(state.pixels_per_beat);
-                        ui.ctx().request_repaint();
-                    }
                 }
 
                 let secondary = ui.input(|input| input.pointer.secondary_pressed());
@@ -660,13 +679,14 @@ pub fn show(
 
 fn header_row(
     ui: &mut egui::Ui,
+    width: f32,
     height: f32,
     layout: Layout,
     contents: impl FnOnce(&mut egui::Ui),
 ) {
-    let (rect, _) = ui.allocate_exact_size(vec2(HEADER_WIDTH, height), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(layout));
-    child.set_width(HEADER_WIDTH);
+    child.set_width(width);
     child.set_clip_rect(rect);
     child.spacing_mut().item_spacing.y = 0.0;
     contents(&mut child);
@@ -680,105 +700,123 @@ fn track_header(
     selected: bool,
     state: &mut TimelineState,
 ) {
-    header_row(ui, ROW_HEIGHT, Layout::top_down(Align::Min), |ui| {
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.colored_label(track.color, "■");
-            let response = ui.selectable_label(selected, &track.name);
-            if response.clicked() {
-                editor.select_track(track.id);
-            }
-            response.context_menu(|ui| {
-                if ui.button("Rename").clicked() {
-                    state.rename_request = Some(track.id);
-                    ui.close();
+    header_row(
+        ui,
+        state.header_width,
+        ROW_HEIGHT,
+        Layout::top_down(Align::Min),
+        |ui| {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.colored_label(track.color, "■");
+                let response = ui.selectable_label(selected, &track.name);
+                if response.clicked() {
+                    editor.select_track(track.id);
                 }
-                ui.menu_button("Color", |ui| {
-                    for color in TRACK_COLORS {
-                        let button = egui::Button::new("   ").fill(rgb(color));
-                        if ui.add(button).clicked() {
-                            editor.set_track_color(track.id, Some(color));
+                response.context_menu(|ui| {
+                    if ui.button("Rename").clicked() {
+                        state.rename_request = Some(track.id);
+                        ui.close();
+                    }
+                    ui.menu_button("Color", |ui| {
+                        for color in TRACK_COLORS {
+                            let button = egui::Button::new("   ").fill(rgb(color));
+                            if ui.add(button).clicked() {
+                                editor.set_track_color(track.id, Some(color));
+                                ui.close();
+                            }
+                        }
+                        if ui.button("No color").clicked() {
+                            editor.set_track_color(track.id, None);
                             ui.close();
                         }
+                    });
+                    if ui.button("Add MIDI clip").clicked() {
+                        editor.select_track(track.id);
+                        editor.add_midi_clip();
+                        ui.close();
                     }
-                    if ui.button("No color").clicked() {
-                        editor.set_track_color(track.id, None);
+                    ui.separator();
+                    if ui.button("Delete track").clicked() {
+                        editor.delete_track(track.id);
                         ui.close();
                     }
                 });
-                if ui.button("Add MIDI clip").clicked() {
-                    editor.select_track(track.id);
-                    editor.add_midi_clip();
-                    ui.close();
+
+                let mute = ui
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new("M").color(Color32::from_rgb(255, 225, 225)),
+                        )
+                        .min_size(vec2(18.0, 18.0))
+                        .fill(if track_muted(track, editor) {
+                            Color32::from_rgb(244, 58, 58)
+                        } else {
+                            Color32::from_rgb(190, 104, 104)
+                        }),
+                    )
+                    .on_hover_text("Mute track");
+                if mute.clicked() {
+                    let muted = track_muted(track, editor);
+                    editor.set_track_muted(track.id, !muted);
                 }
-                ui.separator();
-                if ui.button("Delete track").clicked() {
-                    editor.delete_track(track.id);
-                    ui.close();
+                let solo = ui
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new("S").color(Color32::from_rgb(220, 235, 255)),
+                        )
+                        .min_size(vec2(18.0, 18.0))
+                        .fill(if track_soloed(track, editor) {
+                            Color32::from_rgb(52, 150, 255)
+                        } else {
+                            Color32::from_rgb(86, 128, 190)
+                        }),
+                    )
+                    .on_hover_text("Solo track");
+                if solo.clicked() {
+                    let soloed = track_soloed(track, editor);
+                    editor.set_track_soloed(track.id, !soloed);
                 }
             });
-
-            let mute = ui
-                .add(
-                    egui::Button::new(
-                        egui::RichText::new("M").color(Color32::from_rgb(255, 225, 225)),
-                    )
-                    .min_size(vec2(18.0, 18.0))
-                    .fill(if track_muted(track, editor) {
-                        Color32::from_rgb(244, 58, 58)
-                    } else {
-                        Color32::from_rgb(190, 104, 104)
-                    }),
-                )
-                .on_hover_text("Mute track");
-            if mute.clicked() {
-                let muted = track_muted(track, editor);
-                editor.set_track_muted(track.id, !muted);
-            }
-            let solo = ui
-                .add(
-                    egui::Button::new(
-                        egui::RichText::new("S").color(Color32::from_rgb(220, 235, 255)),
-                    )
-                    .min_size(vec2(18.0, 18.0))
-                    .fill(if track_soloed(track, editor) {
-                        Color32::from_rgb(52, 150, 255)
-                    } else {
-                        Color32::from_rgb(86, 128, 190)
-                    }),
-                )
-                .on_hover_text("Solo track");
-            if solo.clicked() {
-                let soloed = track_soloed(track, editor);
-                editor.set_track_soloed(track.id, !soloed);
-            }
-        });
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            ui.add_space(8.0);
-            mixer.gain(ui, editor, track.id, true);
-            mixer.pan(ui, editor, track.id, true);
-            mixer.meter(ui, editor, track.id);
-        });
-    });
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                ui.add_space(8.0);
+                mixer.gain(ui, editor, track.id, true);
+                mixer.pan(ui, editor, track.id, true);
+                mixer.meter(ui, editor, track.id);
+            });
+        },
+    );
 }
 
-fn master_header(ui: &mut egui::Ui, editor: &mut Editor, mixer: &mut MixerState, master: NodeId) {
-    header_row(ui, ROW_HEIGHT, Layout::top_down(Align::Min), |ui| {
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.colored_label(Color32::from_rgb(196, 202, 214), "◆");
-            ui.strong("Master");
-            ui.small("stereo out");
-        });
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            ui.add_space(8.0);
-            mixer.gain(ui, editor, master, true);
-            mixer.pan(ui, editor, master, true);
-            mixer.meter(ui, editor, master);
-        });
-    });
+fn master_header(
+    ui: &mut egui::Ui,
+    editor: &mut Editor,
+    mixer: &mut MixerState,
+    master: NodeId,
+    header_width: f32,
+) {
+    header_row(
+        ui,
+        header_width,
+        ROW_HEIGHT,
+        Layout::top_down(Align::Min),
+        |ui| {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.colored_label(Color32::from_rgb(196, 202, 214), "◆");
+                ui.strong("Master");
+                ui.small("stereo out");
+            });
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                ui.add_space(8.0);
+                mixer.gain(ui, editor, master, true);
+                mixer.pan(ui, editor, master, true);
+                mixer.meter(ui, editor, master);
+            });
+        },
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1151,6 +1189,24 @@ fn trim_audio_end(available: Option<i64>, original: &Clip, preview: &mut Clip, n
     let length = available.map_or(length, |available| length.min(available));
     if let ClipContent::Audio { source_length, .. } = &mut preview.content {
         *source_length = Frames::from_raw(length);
+    }
+}
+
+fn zoom_factor(ui: &egui::Ui) -> f32 {
+    let zoom = ui.input(|input| input.zoom_delta());
+    let ctrl_scroll = ui.input(|input| {
+        if input.modifiers.command {
+            input.raw_scroll_delta.y
+        } else {
+            0.0
+        }
+    });
+    if (zoom - 1.0).abs() > 0.001 {
+        zoom
+    } else if ctrl_scroll.abs() > 0.0 {
+        (ctrl_scroll * 0.005).exp()
+    } else {
+        1.0
     }
 }
 

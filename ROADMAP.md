@@ -131,8 +131,9 @@ Implemented: native window, transport with editable tempo and bar/beat display,
 Ableton-like timeline with track headers inside the arrangement, track colors,
 rename, mute/solo, add/delete track, add MIDI clip, clip move/resize/split/
 duplicate, marquee multi-selection, zoom-following snap divisions from 1/1 to
-1/128 with triplets and faint guides, key reorder of tracks and notes,
-row-aligned track headers, MIDI and audio previews,
+1/128 with triplets and faint guides, zoom-to-fit plus Ctrl+wheel/pinch,
+C0–C7 piano-roll range, key reorder of tracks and notes, row-aligned and
+resizable track headers, MIDI and audio previews,
 drag/drop WAV/MP3 import with waveform previews and realtime audio-clip
 playback through the track strip, a contextual bottom panel (piano roll for
 MIDI, audio clip waveform/details, and track options), a Time dialog for

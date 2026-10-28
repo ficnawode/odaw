@@ -65,10 +65,13 @@ What works today:
   It also has note resize, right-click menus, snap, trackpad zoom, undo, and
   redo. Snap follows the horizontal zoom from 1/1 down to 1/128 in both the
   arrangement and piano roll; **Snap** turns it on/off and **1/3** switches to
-  triplet divisions. Faint guide lines track the active division. Up/Down
-  transposes selected notes or moves the selected track when no notes are
-  selected, and the track headers share the timeline row height. Click the
-  ruler or empty timeline to seek the red cursor; Ctrl+E splits
+  triplet divisions. Faint guide lines track the active division. Zoom supports
+  Ctrl+wheel and trackpad pinch, widens down to 0.05 px/beat, and **Fit** shows
+  the whole song or clip. The piano roll spans C0–C7. Up/Down transposes
+  selected notes or moves the selected track when no notes are selected, and
+  the track headers share the timeline row height. The track header column has
+  a draggable width so its gain/pan/meter controls stay usable. Click the ruler
+  or empty timeline to seek the red cursor; Ctrl+E splits
   the selection at the cursor. Tempo is editable in the transport; the Time
   dialog (Ctrl+T or the `Time` button) sets the bar/beat position, tempo, and
   time signature. Audio files

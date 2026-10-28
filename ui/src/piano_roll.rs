@@ -5,10 +5,12 @@ use odaw_core::{Clip, ClipContent, ClipId, Note, NoteId, PPQ, Tick};
 
 use crate::editor::Editor;
 
-const PITCH_LOW: u8 = 48;
-const PITCH_HIGH: u8 = 84;
+const PITCH_LOW: u8 = 12; // C0
+const PITCH_HIGH: u8 = 96; // C7
 const ROW_HEIGHT: f32 = 14.0;
 const KEY_WIDTH: f32 = 48.0;
+const MIN_ZOOM: f32 = 0.01;
+const MAX_ZOOM: f32 = 4096.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Snap {
@@ -153,6 +155,7 @@ struct Marquee {
 pub struct PianoRollState {
     pub pixels_per_beat: f32,
     pub(crate) snap: SnapSettings,
+    fit_requested: bool,
     drag: Option<DragState>,
     marquee: Option<Marquee>,
     active_clip: Option<ClipId>,
@@ -166,6 +169,7 @@ impl Default for PianoRollState {
         Self {
             pixels_per_beat: 90.0,
             snap: SnapSettings::at_zoom(90.0),
+            fit_requested: false,
             drag: None,
             marquee: None,
             active_clip: None,
@@ -189,6 +193,13 @@ impl PianoRollState {
     pub fn show(&mut self, ui: &mut egui::Ui, editor: &mut Editor) {
         editor.ensure_selection();
         self.controls(ui, editor);
+        if ui.rect_contains_pointer(ui.max_rect()) {
+            let factor = zoom_factor(ui);
+            if (factor - 1.0).abs() > 0.001 {
+                self.pixels_per_beat = (self.pixels_per_beat * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+                ui.ctx().request_repaint();
+            }
+        }
         self.snap.update_zoom(self.pixels_per_beat);
 
         let Some((clip_id, clip)) = editor
@@ -224,9 +235,15 @@ impl PianoRollState {
             .as_ref()
             .map(|drag| drag.previews.iter().map(|note| (note.id, *note)).collect())
             .unwrap_or_default();
-        let px_per_tick = self.pixels_per_beat / PPQ as f32;
         let height = f32::from(PITCH_HIGH - PITCH_LOW + 1) * ROW_HEIGHT;
         let viewport_width = (ui.available_width() - KEY_WIDTH - 12.0).max(240.0);
+        if self.fit_requested {
+            let beats = clip.length.raw().max(1) as f32 / PPQ as f32;
+            self.pixels_per_beat = (viewport_width / beats).clamp(MIN_ZOOM, MAX_ZOOM);
+            self.snap.update_zoom(self.pixels_per_beat);
+            self.fit_requested = false;
+        }
+        let px_per_tick = self.pixels_per_beat / PPQ as f32;
         let grid_width = (clip.length.raw().max(1) as f32 * px_per_tick).max(viewport_width);
 
         egui::ScrollArea::vertical()
@@ -304,10 +321,17 @@ impl PianoRollState {
         ui.horizontal_wrapped(|ui| {
             ui.label("Zoom");
             ui.add(
-                egui::Slider::new(&mut self.pixels_per_beat, 16.0..=4096.0)
+                egui::Slider::new(&mut self.pixels_per_beat, MIN_ZOOM..=MAX_ZOOM)
                     .logarithmic(true)
                     .show_value(false),
             );
+            if ui
+                .button("Fit")
+                .on_hover_text("Fit the whole clip")
+                .clicked()
+            {
+                self.fit_requested = true;
+            }
             ui.separator();
             ui.checkbox(&mut self.snap.enabled, "Snap")
                 .on_hover_text("Turn grid snapping on or off");
@@ -391,29 +415,6 @@ impl PianoRollState {
         let primary_released = ui.input(|input| input.pointer.primary_released());
         let secondary_pressed = ui.input(|input| input.pointer.secondary_pressed());
         let shift = ui.input(|input| input.modifiers.shift);
-
-        if response.hovered() {
-            let zoom = ui.input(|input| input.zoom_delta());
-            let ctrl_scroll = ui.input(|input| {
-                if input.modifiers.command {
-                    input.raw_scroll_delta.y
-                } else {
-                    0.0
-                }
-            });
-            let factor = if (zoom - 1.0).abs() > 0.001 {
-                zoom
-            } else if ctrl_scroll.abs() > 0.0 {
-                (ctrl_scroll * 0.01).exp()
-            } else {
-                1.0
-            };
-            if (factor - 1.0).abs() > 0.001 {
-                self.pixels_per_beat = (self.pixels_per_beat * factor).clamp(16.0, 4096.0);
-                self.snap.update_zoom(self.pixels_per_beat);
-                ui.ctx().request_repaint();
-            }
-        }
 
         if primary_pressed && response.hovered() {
             if let Some(position) = pointer {
@@ -947,6 +948,24 @@ fn resized_note(note: Note, delta_ticks: i64, clip_length: Tick, snap: SnapSetti
     Note {
         length: Tick::from_raw(length),
         ..note
+    }
+}
+
+fn zoom_factor(ui: &egui::Ui) -> f32 {
+    let zoom = ui.input(|input| input.zoom_delta());
+    let ctrl_scroll = ui.input(|input| {
+        if input.modifiers.command {
+            input.raw_scroll_delta.y
+        } else {
+            0.0
+        }
+    });
+    if (zoom - 1.0).abs() > 0.001 {
+        zoom
+    } else if ctrl_scroll.abs() > 0.0 {
+        (ctrl_scroll * 0.005).exp()
+    } else {
+        1.0
     }
 }
 
