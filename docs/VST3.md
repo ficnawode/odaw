@@ -121,13 +121,14 @@ cargo run -p odaw-vst3 --example editor_spike
 
 ## Example project
 
-`examples/ode-to-joy.odaw` is a five-track Dexed arrangement of Ode to Joy:
+`examples/ode-to-joy.odaw` is a six-track Dexed arrangement of Ode to Joy:
 
 - Lead — PHAROH Dexed program, Hall reverb;
-- Harmony — diatonic third below the lead, Hall reverb;
-- Bass — RUMBLE 1 playing the chord roots;
+- Harmony — diatonic third below the lead;
+- Bass — RUMBLE 1 playing a syncopated root/octave/fifth pattern;
+- Bass Bell — offbeat bell figures using the C,D,Eb,F program;
 - Pad — Slow3D Pad playing sustained triads, Plate reverb;
-- Arp — ARP 2600 playing eighth-note chord figures, Plate reverb.
+- Arp — ARP 2600 playing syncopated eighth-note chord figures with rests.
 
 It is 16 bars at 120 BPM with a loop region and two markers. Regenerate it from
 the installed catalogue with:

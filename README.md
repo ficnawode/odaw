@@ -124,9 +124,10 @@ cargo run -p odaw-cli -- demo-dexed examples/ode-to-joy.odaw
 cargo run -p odaw-cli -- render examples/ode-to-joy.odaw -o ode.wav
 ```
 
-`examples/ode-to-joy.odaw` is a five-track Dexed arrangement of Ode to Joy:
-lead, diatonic harmony, bass, pad, and arpeggio, with Hall/Plate reverb on the
-melodic layers. `demo-dexed` regenerates it from the installed plugin catalogue.
+`examples/ode-to-joy.odaw` is a six-track Dexed arrangement of Ode to Joy:
+lead, diatonic harmony, syncopated bass, offbeat bass bell, pad, and arpeggio,
+with Hall reverb on the lead and Plate reverb on the pad. `demo-dexed`
+regenerates it from the installed plugin catalogue.
 
 A container is a directory:
 

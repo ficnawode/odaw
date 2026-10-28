@@ -13,6 +13,7 @@ const DEXED: &str = "ABCDEF019182FAEB4447534244657864";
 const BARS: i64 = 16;
 const BEATS_PER_BAR: i64 = 4;
 const TOTAL_BEATS: i64 = BARS * BEATS_PER_BAR;
+const EIGHTH: i64 = odaw_core::PPQ / 2;
 
 #[derive(Clone, Copy)]
 enum EffectChoice {
@@ -88,7 +89,7 @@ pub fn create(path: &Path, force: bool) -> Result<(), String> {
                 Port::input(PortId::from_raw(0), ChannelLayout::Stereo),
                 Port::output(PortId::from_raw(1), ChannelLayout::Stereo),
             ])
-            .with_param(ParamId::new("gain_db"), ParamValue::Float(0.0)),
+            .with_param(ParamId::new("gain_db"), ParamValue::Float(3.0)),
     );
 
     let mut next_node = 2u64;
@@ -173,8 +174,8 @@ pub fn create(path: &Path, force: bool) -> Result<(), String> {
                                 pitch: note.pitch,
                                 velocity: note.velocity,
                                 channel: 0,
-                                start: Tick::from_raw(note.start * odaw_core::PPQ),
-                                length: Tick::from_raw(note.length * odaw_core::PPQ),
+                                start: Tick::from_raw(note.start * EIGHTH),
+                                length: Tick::from_raw(note.length * EIGHTH),
                             }
                         })
                         .collect(),
@@ -257,31 +258,45 @@ fn track_specs() -> Vec<TrackSpec> {
         })
         .collect();
     let mut bass = Vec::new();
+    let mut bell = Vec::new();
     let mut pad = Vec::new();
     let mut arp = Vec::new();
     for (chord_index, chord) in PROGRESSION.iter().cycle().take(8).enumerate() {
-        let start = chord_index as i64 * 8;
-        bass.push(NoteSpec {
-            pitch: chord.bass_pitch,
-            start,
-            length: 8,
-            velocity: 96,
-        });
+        let start = chord_index as i64 * 16;
+        for (offset, length, interval, velocity) in BASS_PATTERN {
+            bass.push(NoteSpec {
+                pitch: chord.bass_pitch + interval as u8,
+                start: start + offset,
+                length,
+                velocity,
+            });
+        }
+        for (offset, length, interval, velocity) in BELL_PATTERN {
+            bell.push(NoteSpec {
+                pitch: chord.bass_pitch + interval as u8,
+                start: start + offset,
+                length,
+                velocity,
+            });
+        }
         for pitch in chord.pad_pitches {
             pad.push(NoteSpec {
                 pitch,
                 start,
-                length: 8,
+                length: 16,
                 velocity: 70,
             });
         }
         for bar in 0..2 {
-            for (step, &tone) in ARP_PATTERN.iter().enumerate() {
+            for (step, tone) in ARP_PATTERN.iter().enumerate() {
+                let Some(tone) = tone else {
+                    continue;
+                };
                 arp.push(NoteSpec {
-                    pitch: chord.arp_pitches[tone],
-                    start: start + bar * 4 + step as i64 / 2,
+                    pitch: chord.arp_pitches[*tone],
+                    start: start + bar * 8 + step as i64,
                     length: 1,
-                    velocity: 72,
+                    velocity: if step % 3 == 0 { 78 } else { 68 },
                 });
             }
         }
@@ -302,27 +317,37 @@ fn track_specs() -> Vec<TrackSpec> {
             name: "Harmony",
             color: 0x53b88b,
             program: 5, // Lavitar
-            gain_db: -10.0,
+            gain_db: -14.0,
             pan: -0.22,
-            reverb: Some(EffectChoice::Hall),
-            reverb_wet: 0.24,
+            reverb: None,
+            reverb_wet: 0.0,
             notes: harmony,
         },
         TrackSpec {
             name: "Bass",
             color: 0xe0a458,
             program: 21, // RUMBLE 1
-            gain_db: -3.0,
+            gain_db: 6.0,
             pan: 0.0,
             reverb: None,
             reverb_wet: 0.0,
             notes: bass,
         },
         TrackSpec {
+            name: "Bass Bell",
+            color: 0xc9a14c,
+            program: 23, // C,D,Eb,F
+            gain_db: -20.0,
+            pan: -0.3,
+            reverb: None,
+            reverb_wet: 0.0,
+            notes: bell,
+        },
+        TrackSpec {
             name: "Pad",
             color: 0x9a7bd8,
             program: 30, // Slow3D Pad
-            gain_db: -12.0,
+            gain_db: -16.0,
             pan: 0.16,
             reverb: Some(EffectChoice::Plate),
             reverb_wet: 0.3,
@@ -334,8 +359,8 @@ fn track_specs() -> Vec<TrackSpec> {
             program: 15, // ARP 2600
             gain_db: -13.0,
             pan: 0.24,
-            reverb: Some(EffectChoice::Plate),
-            reverb_wet: 0.32,
+            reverb: None,
+            reverb_wet: 0.0,
             notes: arp,
         },
     ]
@@ -378,8 +403,8 @@ fn melody() -> Vec<NoteSpec> {
         .iter()
         .map(|(pitch, start, length, velocity)| NoteSpec {
             pitch: *pitch as u8,
-            start: *start,
-            length: *length,
+            start: *start * 2,
+            length: *length * 2,
             velocity: *velocity as u8,
         })
         .collect();
@@ -387,8 +412,8 @@ fn melody() -> Vec<NoteSpec> {
         .iter()
         .map(|(pitch, start, length, velocity)| NoteSpec {
             pitch: *pitch as u8,
-            start: *start + 32,
-            length: *length,
+            start: *start * 2 + 64,
+            length: *length * 2,
             velocity: *velocity as u8,
         })
         .collect();
@@ -416,7 +441,40 @@ struct Chord {
     arp_pitches: [u8; 4],
 }
 
-const ARP_PATTERN: [usize; 8] = [0, 1, 2, 3, 2, 1, 0, 1];
+/// Syncopated bass hits in eighth notes: `(offset, length, semitone, velocity)`.
+const BASS_PATTERN: [(i64, i64, i32, u8); 10] = [
+    (0, 3, 0, 102),
+    (3, 1, 12, 88),
+    (5, 1, 7, 90),
+    (7, 1, 0, 96),
+    (8, 2, 0, 100),
+    (10, 1, 12, 88),
+    (11, 1, 7, 90),
+    (13, 1, 0, 96),
+    (14, 1, 12, 86),
+    (15, 1, 7, 88),
+];
+
+/// Offbeat bell figures in eighth notes, relative to the chord root.
+const BELL_PATTERN: [(i64, i64, i32, u8); 6] = [
+    (2, 1, 24, 80),
+    (4, 1, 12, 74),
+    (7, 1, 19, 78),
+    (10, 1, 24, 82),
+    (12, 1, 19, 76),
+    (15, 1, 12, 72),
+];
+
+const ARP_PATTERN: [Option<usize>; 8] = [
+    Some(0),
+    None,
+    Some(2),
+    Some(1),
+    None,
+    Some(3),
+    Some(0),
+    Some(2),
+];
 
 const PROGRESSION: [Chord; 4] = [
     Chord {
@@ -448,12 +506,12 @@ mod tests {
     #[test]
     fn the_demo_has_sixteen_bars_of_melody() {
         let notes = melody();
-        assert_eq!(notes.iter().map(|note| note.start).max(), Some(62));
+        assert_eq!(notes.iter().map(|note| note.start).max(), Some(124));
         assert_eq!(
             notes.iter().map(|note| note.start + note.length).max(),
-            Some(64)
+            Some(128)
         );
-        assert!(notes.iter().any(|note| note.start >= 32));
+        assert!(notes.iter().any(|note| note.start >= 64));
     }
 
     #[test]
@@ -464,13 +522,13 @@ mod tests {
     }
 
     #[test]
-    fn the_demo_has_five_layered_tracks() {
+    fn the_demo_has_six_layered_tracks() {
         let specs = track_specs();
         assert_eq!(
             specs.iter().map(|spec| spec.name).collect::<Vec<_>>(),
-            vec!["Lead", "Harmony", "Bass", "Pad", "Arp"]
+            vec!["Lead", "Harmony", "Bass", "Bass Bell", "Pad", "Arp"]
         );
-        assert!(specs.iter().filter(|spec| spec.reverb.is_some()).count() >= 3);
+        assert!(specs.iter().filter(|spec| spec.reverb.is_some()).count() >= 2);
         assert!(specs.iter().all(|spec| !spec.notes.is_empty()));
         let last_start = specs
             .iter()
@@ -482,7 +540,7 @@ mod tests {
             .flat_map(|spec| spec.notes.iter())
             .map(|note| note.start + note.length)
             .max();
-        assert!(last_start.is_some_and(|start| start >= 62));
-        assert_eq!(last_end, Some(64));
+        assert!(last_start.is_some_and(|start| start >= 124));
+        assert_eq!(last_end, Some(128));
     }
 }

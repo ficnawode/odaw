@@ -299,6 +299,7 @@ impl Editor {
                 self.audio_error = None;
             }
             Err(error) => {
+                eprintln!("audio start failed: {error}");
                 self.audio = None;
                 self.audio_error = Some(error);
                 self.playing = false;
