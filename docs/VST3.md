@@ -60,6 +60,34 @@ cargo run -p odaw-cli -- plugins --refresh
 cargo run -p odaw-cli -- plugins --json
 ```
 
+## Plugin chains
+
+A track rack is a serial chain, top to bottom. Instruments (devices with no
+audio input) stay first; effects follow in processing order. The UI can add an
+effect to the selected track, move devices up/down, and remove them. Removing a
+device also removes its node, so the document never leaves an orphaned device.
+
+Every device in the chain is still a normal `Node` in `Rack` order; VST3 is not
+special-cased in the compiler. Latency accumulates serially, and the existing
+per-edge compensation aligns parallel tracks. Effects can be stacked freely as
+long as each one has one main mono/stereo input and output.
+
+## Persistent plugin state
+
+`Node.state` is the canonical patch. Three things write it:
+
+- **Save** captures component/controller state and current normalized parameter
+  values into the document before writing the container.
+- **Close editor** and the **Save state** button do the same without saving the
+  project, so in-memory edits and undo see the current patch.
+- **Structural rebuilds** capture state into a throwaway snapshot, so
+  re-instantiating a plugin for a rack/clip edit keeps the current patch.
+
+The capture is one history entry labelled `Update plugin state`. Undo/redo
+load the document snapshot and deliberately do *not* overwrite it with the live
+plugin patch. Voices and tails still reset when a structural edit
+re-instantiates the plugin; instance retention remains future work.
+
 ## Audio and events
 
 - one main audio input bus (effects) and one main output bus; mono or stereo;
@@ -96,3 +124,26 @@ cargo test -p odaw-vst3
 The tests skip when the plugin is absent. They cover catalogue metadata, note
 processing, state capture/restore, and an offline project render through the
 normal compiler.
+
+Stacking is covered without needing an effect plugin:
+
+```sh
+cargo test -p odaw-compile effects_stack_in_rack_order
+cargo test -p odaw-ui rack_devices_can_be_reordered_and_removed
+cargo test -p odaw-ui live_plugin_state_is_persisted_and_undoable
+```
+
+`effects_stack_in_rack_order` runs two order-sensitive test effects and checks
+that the rack is actually serial. For a manual VST3 effect test, install a free
+VST3 effect from the distro (for example `dragonfly-reverb-vst3`,
+`elephantdsp-roomreverb-vst3`, or `dpf-plugins-vst3`), then:
+
+1. Click **Plugins** → **Rescan**.
+2. Add two different effects to the same track.
+3. Move the second effect up/down and confirm the sound changes accordingly.
+4. Open each editor, change a parameter, click **Save state**.
+5. Save, reopen, and confirm both patches and the chain order are restored.
+
+The next step for CI parity is a tiny MIT-licensed test effect bundle built from
+the `vst3-rs` bindings, so effect stacking and state round-trips can run without
+a user-installed plugin.

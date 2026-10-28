@@ -75,8 +75,11 @@ What works today:
   update the live parameter buffer and commit one value-only command on
   release. A plugin browser scans VST3 bundles in the background; an instrument
   is added as a new track and an effect is appended to the selected track's
-  rack. VST3 devices expose a generic normalized parameter panel and a floating
-  editor window.
+  rack. The device list is the serial signal chain: effects can be reordered or
+  removed, and each VST3 device exposes a generic normalized parameter panel, a
+  floating editor window, and explicit state capture. Saving and closing an
+  editor persist component/controller state and current parameters into the
+  project.
 - `odaw`: a CLI for create, inspect, rename, demo, validate, render, play, and
   VST3 discovery.
 - CI: formatting, clippy with warnings denied, and the workspace test suite.

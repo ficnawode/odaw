@@ -720,6 +720,63 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy, Debug)]
+    enum Effect {
+        Bias,
+        Double,
+    }
+
+    #[derive(Debug)]
+    struct TestEffect(Effect);
+
+    impl DeviceProcessor for TestEffect {
+        fn process(&mut self, block: &mut Block<'_>) {
+            for (destination, input) in block.output.iter_mut().zip(block.input) {
+                *destination = match self.0 {
+                    Effect::Bias => *input + 0.5,
+                    Effect::Double => *input * 2.0,
+                };
+            }
+        }
+    }
+
+    struct ChainFactory;
+
+    impl DeviceFactory for ChainFactory {
+        fn descriptor(&self, kind: &NodeKind) -> Option<odaw_engine::DeviceDescriptor> {
+            let effect = match kind.as_str() {
+                "test.bias" => Effect::Bias,
+                "test.double" => Effect::Double,
+                _ => return None,
+            };
+            Some(odaw_engine::DeviceDescriptor {
+                kind: kind.clone(),
+                label: format!("{effect:?}"),
+                vendor: "test".to_owned(),
+                instrument: false,
+                parameters: Vec::new(),
+            })
+        }
+
+        fn build(
+            &self,
+            node: &Node,
+            context: &DeviceContext,
+        ) -> Result<Box<dyn DeviceProcessor>, odaw_engine::DeviceError> {
+            let effect = match node.kind.as_ref().map(NodeKind::as_str) {
+                Some("test.bias") => Effect::Bias,
+                Some("test.double") => Effect::Double,
+                _ => {
+                    return Err(odaw_engine::DeviceError::new(
+                        context.node,
+                        "unknown test effect",
+                    ));
+                }
+            };
+            Ok(Box::new(TestEffect(effect)))
+        }
+    }
+
     fn compile(project: &Project) -> Result<CompiledProject, CompileError> {
         Compiler::builtin().compile(project)
     }
@@ -1073,6 +1130,73 @@ mod tests {
             compile(&project),
             Err(CompileError::UnsupportedRole { .. })
         ));
+    }
+
+    #[test]
+    fn effects_stack_in_rack_order() {
+        use odaw_engine::Engine;
+
+        let build = |rack: [NodeId; 2]| {
+            let mut project = Project::empty("chain", 48_000, 0).unwrap();
+            let (master_id, master_node) = master(1);
+            project.nodes.insert(master_id, master_node);
+            let track_id = NodeId::from_raw(2);
+            project.nodes.insert(
+                track_id,
+                Node::new(NodeRole::Track)
+                    .with_ports([
+                        Port::input(PortId::from_raw(0), ChannelLayout::Stereo),
+                        Port::output(PortId::from_raw(1), ChannelLayout::Stereo),
+                    ])
+                    .with_rack([NodeId::from_raw(3), rack[0], rack[1]]),
+            );
+            project.nodes.insert(
+                NodeId::from_raw(3),
+                Node::device(NodeKind::new("builtin.sine"))
+                    .with_ports([Port::output(PortId::from_raw(0), ChannelLayout::Stereo)])
+                    .with_param(ParamId::new("frequency"), ParamValue::Float(12_000.0))
+                    .with_param(ParamId::new("gain"), ParamValue::Float(1.0)),
+            );
+            for id in rack {
+                let kind = if id == NodeId::from_raw(4) {
+                    "test.bias"
+                } else {
+                    "test.double"
+                };
+                project.nodes.insert(
+                    id,
+                    Node::device(NodeKind::new(kind)).with_ports([
+                        Port::input(PortId::from_raw(0), ChannelLayout::Stereo),
+                        Port::output(PortId::from_raw(1), ChannelLayout::Stereo),
+                    ]),
+                );
+            }
+            connect(&mut project, 6, track_id, master_id);
+            project
+        };
+
+        let render = |rack: [NodeId; 2]| {
+            let compiled = Compiler::builtin()
+                .with_factory(ChainFactory)
+                .compile(&build(rack))
+                .unwrap();
+            let mut engine =
+                Engine::new(compiled, std::num::NonZeroUsize::new(4).unwrap()).unwrap();
+            let mut output = vec![0.0; 8];
+            engine.process_block(4, &[], &mut output).unwrap();
+            output
+        };
+
+        let bias_then_double = render([NodeId::from_raw(4), NodeId::from_raw(5)]);
+        let double_then_bias = render([NodeId::from_raw(5), NodeId::from_raw(4)]);
+        assert!(
+            (bias_then_double[2] - 3.0).abs() < 1e-6,
+            "{bias_then_double:?}"
+        );
+        assert!(
+            (double_then_bias[2] - 2.5).abs() < 1e-6,
+            "{double_then_bias:?}"
+        );
     }
 
     #[test]

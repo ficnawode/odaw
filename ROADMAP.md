@@ -235,9 +235,15 @@ missing-plugin pass-through placeholders, a generic parameter panel, a
 background plugin browser, instrument/effect insertion, and floating editor
 windows verified under XWayland.
 
+Rack effects stack in serial order and can be reordered/removed in the UI.
+Plugin state and current normalized parameters are captured into `Node.state`
+and `Node.params` on save, editor close, and explicit "Save state"; undo/redo
+restores the document snapshot rather than the live patch.
+
 Remaining: instance retention across structural edits (currently state is
 re-instantiated), sample-accurate automation, multi-out/sidechain buses,
-process isolation, Windows/macOS bundles, and `.vstpreset` import/export.
+process isolation, Windows/macOS bundles, a bundled MIT test effect for CI, and
+`.vstpreset` import/export.
 
 ## M9 — Release hardening
 

@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use odaw_compile::Compiler;
 use odaw_control::{
-    AssetCommand, ClipCommand, Command, CommandKind, EdgeCommand, Event, NodeCommand, NoteCommand,
-    ParamChange, ParamCommand, Session, SessionError, TempoCommand,
+    AssetCommand, ClipCommand, Command, CommandKind, DeviceCommand, EdgeCommand, Event,
+    NodeCommand, NoteCommand, ParamChange, ParamCommand, Session, SessionError, TempoCommand,
 };
 use odaw_core::{
     Asset, AssetId, AssetKind, ChannelLayout, Clip, ClipContent, ClipId, Edge, Frames, Node,
@@ -630,7 +630,7 @@ impl Editor {
     pub fn apply_plugin_catalog(&mut self, catalog: Catalog) {
         self.status = Some(format!("found {} plugin(s)", catalog.entries.len()));
         self.vst3.set_catalog(catalog);
-        self.rebuild_audio();
+        self.rebuild_audio(true);
     }
 
     pub fn plugin_parameters(&self, node: NodeId) -> Vec<DeviceParameter> {
@@ -649,6 +649,76 @@ impl Editor {
         self.vst3
             .plugin(node)
             .is_some_and(|plugin| window.is_for(&plugin))
+    }
+
+    /// Reorder one device inside its track rack. A source device (an
+    /// instrument with no audio input) must remain first.
+    pub fn move_device(&mut self, track: NodeId, device: NodeId, offset: isize) -> bool {
+        let Some((rack, index)) = self.rack_position(track, device) else {
+            self.error = Some("the device is not in this rack".to_owned());
+            return false;
+        };
+        let Some(target) = index.checked_add_signed(offset) else {
+            return false;
+        };
+        if target >= rack.len() || target == index {
+            return false;
+        }
+        let mut reordered = rack.clone();
+        reordered.remove(index);
+        reordered.insert(target, device);
+        if !self.valid_rack_order(&reordered) {
+            self.error = Some("an instrument must stay first in its rack".to_owned());
+            return false;
+        }
+        let result =
+            self.session
+                .apply_command(Command::new(CommandKind::Node(NodeCommand::SetRack {
+                    node: track,
+                    rack: reordered,
+                })));
+        self.after_edit(result)
+    }
+
+    pub fn remove_device(&mut self, track: NodeId, device: NodeId) -> bool {
+        let Some((rack, _)) = self.rack_position(track, device) else {
+            self.error = Some("the device is not in this rack".to_owned());
+            return false;
+        };
+        let mut reduced = rack;
+        reduced.retain(|id| *id != device);
+        let result = self.session.apply_commands(
+            vec![
+                Command::new(CommandKind::Node(NodeCommand::SetRack {
+                    node: track,
+                    rack: reduced,
+                })),
+                Command::new(CommandKind::Node(NodeCommand::Remove { node: device })),
+            ],
+            "Remove device",
+        );
+        self.after_edit(result)
+    }
+
+    fn rack_position(&self, track: NodeId, device: NodeId) -> Option<(Vec<NodeId>, usize)> {
+        let node = self.session.project().nodes.get(&track)?;
+        let rack = node.rack.iter().copied().collect::<Vec<_>>();
+        let index = rack.iter().position(|id| *id == device)?;
+        Some((rack, index))
+    }
+
+    fn valid_rack_order(&self, rack: &[NodeId]) -> bool {
+        let project = self.session.project();
+        let mut sources = rack.iter().enumerate().filter(|(_, id)| {
+            project
+                .nodes
+                .get(id)
+                .is_some_and(|node| !device_has_input(node))
+        });
+        matches!(
+            (sources.next(), sources.next()),
+            (None, _) | (Some((0, _)), None)
+        )
     }
 
     pub fn add_plugin(&mut self, class_id: &str) -> bool {
@@ -831,12 +901,66 @@ impl Editor {
         }
     }
 
+    /// Copy live plugin component/controller state and parameter values into
+    /// the document as one history entry. Saving calls this first, and closing
+    /// an editor calls it so in-memory projects also carry the current patch.
+    pub fn persist_plugin_state(&mut self) -> bool {
+        let states = self.vst3.capture_states();
+        let parameters = self.vst3.capture_parameters();
+        if states.is_empty() && parameters.is_empty() {
+            return false;
+        }
+        let project = self.session.project().clone();
+        let mut commands = Vec::new();
+        for (node, state) in states {
+            let Some(existing) = project.nodes.get(&node) else {
+                continue;
+            };
+            if existing.state.as_deref() == Some(state.as_slice()) {
+                continue;
+            }
+            commands.push(Command::new(CommandKind::Device(DeviceCommand::SetState {
+                node,
+                state: Some(state.into()),
+            })));
+        }
+        for (node, values) in parameters {
+            let Some(existing) = project.nodes.get(&node) else {
+                continue;
+            };
+            for (param, value) in values {
+                if existing.params.get(&param) == Some(&value) {
+                    continue;
+                }
+                commands.push(Command::new(CommandKind::Param(ParamCommand::Set {
+                    address: ParamAddress { node, param },
+                    value,
+                    change: ParamChange::Value,
+                })));
+            }
+        }
+        if commands.is_empty() {
+            return false;
+        }
+        match self.session.apply_commands(commands, "Update plugin state") {
+            Ok(_) => {
+                self.error = None;
+                true
+            }
+            Err(error) => {
+                self.error = Some(error.to_string());
+                false
+            }
+        }
+    }
+
     pub fn save(&mut self) {
+        self.persist_plugin_state();
         let path = self
             .path
             .clone()
             .unwrap_or_else(|| PathBuf::from(format!("{}.odaw", self.session.project().meta.name)));
-        let project = self.project_with_plugin_state(self.session.project());
+        let project = self.session.project().clone();
         match Container::new(&path).save(&project) {
             Ok(()) => {
                 self.path = Some(path.clone());
@@ -914,13 +1038,15 @@ impl Editor {
     pub fn undo(&mut self) {
         self.session.undo();
         self.ensure_selection();
-        self.rebuild_audio();
+        // Undo is an explicit document state: do not overwrite it with the
+        // current live plugin patch.
+        self.rebuild_audio(false);
     }
 
     pub fn redo(&mut self) {
         self.session.redo();
         self.ensure_selection();
-        self.rebuild_audio();
+        self.rebuild_audio(false);
     }
 
     pub fn selected_track(&self) -> Option<NodeId> {
@@ -1786,7 +1912,7 @@ impl Editor {
                 if self.audio.is_none() {
                     self.start_audio();
                 } else {
-                    self.rebuild_audio();
+                    self.rebuild_audio(true);
                 }
                 true
             }
@@ -1797,12 +1923,12 @@ impl Editor {
         }
     }
 
-    fn rebuild_audio(&mut self) {
+    fn rebuild_audio(&mut self, capture_plugin_state: bool) {
         let was_playing = self.playing;
         let project = self.session.project().clone();
         let start = frames_at(&project, self.cursor);
         let sources = self.audio_sources();
-        let prepared = self.prepare_state_at(&project, start, &sources);
+        let prepared = self.prepare_state_at_with(&project, start, &sources, capture_plugin_state);
         let Some(audio) = &mut self.audio else {
             return;
         };
@@ -1840,7 +1966,21 @@ impl Editor {
         start_frame: u64,
         audio_sources: &AudioSources,
     ) -> Result<(RealtimeState, u64), String> {
-        let project = self.project_with_plugin_state(project);
+        self.prepare_state_at_with(project, start_frame, audio_sources, true)
+    }
+
+    fn prepare_state_at_with(
+        &self,
+        project: &Project,
+        start_frame: u64,
+        audio_sources: &AudioSources,
+        capture_plugin_state: bool,
+    ) -> Result<(RealtimeState, u64), String> {
+        let project = if capture_plugin_state {
+            self.project_with_plugin_state(project)
+        } else {
+            project.clone()
+        };
         prepare_state_at(&project, start_frame, audio_sources, &self.vst3)
     }
 
@@ -1868,6 +2008,12 @@ impl Editor {
         }
         project
     }
+}
+
+fn device_has_input(node: &Node) -> bool {
+    node.ports
+        .iter()
+        .any(|port| port.direction == PortDirection::Input)
 }
 
 fn frames_at(project: &Project, tick: Tick) -> u64 {
@@ -2098,6 +2244,127 @@ mod tests {
             note_clipboard: None,
             vst3: Vst3Backend::new(Catalog::default()),
         }
+    }
+
+    #[test]
+    fn rack_devices_can_be_reordered_and_removed() {
+        let mut editor = test_editor();
+        let track = NodeId::from_raw(1);
+        let instrument = NodeId::from_raw(2);
+        let gain = NodeId::from_raw(3);
+        let second_gain = NodeId::from_raw(99);
+        editor
+            .session
+            .apply_commands(
+                vec![
+                    Command::new(CommandKind::Node(NodeCommand::Add {
+                        node: second_gain,
+                        value: Box::new(
+                            Node::device(NodeKind::new(odaw_dsp::GAIN_KIND)).with_ports([
+                                Port::input(PortId::from_raw(0), ChannelLayout::Stereo),
+                                Port::output(PortId::from_raw(1), ChannelLayout::Stereo),
+                            ]),
+                        ),
+                    })),
+                    Command::new(CommandKind::Node(NodeCommand::SetRack {
+                        node: track,
+                        rack: vec![instrument, gain, second_gain],
+                    })),
+                ],
+                "Add a second gain",
+            )
+            .unwrap();
+
+        assert!(editor.move_device(track, second_gain, -1));
+        assert_eq!(
+            editor.session.project().nodes[&track]
+                .rack
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![instrument, second_gain, gain]
+        );
+
+        assert!(!editor.move_device(track, gain, -2));
+        assert!(
+            editor
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("instrument must stay first"))
+        );
+
+        assert!(editor.remove_device(track, second_gain));
+        assert_eq!(
+            editor.session.project().nodes[&track]
+                .rack
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![instrument, gain]
+        );
+        assert!(!editor.session.project().nodes.contains_key(&second_gain));
+    }
+
+    #[test]
+    fn live_plugin_state_is_persisted_and_undoable() {
+        const DEXED: &str = "ABCDEF019182FAEB4447534244657864";
+        let catalog = Catalog::scan();
+        if catalog.get(DEXED).is_none() {
+            eprintln!("Dexed is not installed; skipping");
+            return;
+        }
+        let mut editor = test_editor();
+        editor.vst3 = Vst3Backend::new(catalog);
+        assert!(editor.add_plugin(DEXED));
+
+        let plugin = editor
+            .session
+            .project()
+            .nodes
+            .iter()
+            .find(|(_, node)| {
+                node.kind
+                    .as_ref()
+                    .is_some_and(|kind| kind.as_str().starts_with("vst3:"))
+            })
+            .map(|(id, _)| *id)
+            .expect("the plugin node exists");
+        assert!(
+            editor
+                .session
+                .project()
+                .nodes
+                .get(&plugin)
+                .is_some_and(|node| node.state.is_none())
+        );
+
+        let handle = editor.vst3.plugin(plugin).expect("the plugin is live");
+        let param_id = handle.lock().unwrap().get_parameters().unwrap()[0].id;
+        {
+            let mut plugin = handle.lock().unwrap();
+            plugin.set_parameter(param_id, 0.83).unwrap();
+        }
+        let expected = handle
+            .lock()
+            .unwrap()
+            .get_parameters()
+            .unwrap()
+            .into_iter()
+            .find(|parameter| parameter.id == param_id)
+            .map(|parameter| parameter.value)
+            .expect("the parameter is still listed");
+        let key = format!("param.{param_id}");
+        assert!(editor.persist_plugin_state());
+
+        let node = &editor.session.project().nodes[&plugin];
+        assert!(node.state.as_ref().is_some_and(|state| !state.is_empty()));
+        assert_eq!(editor.param_value(plugin, &key), Some(expected));
+        assert_eq!(editor.session.undo_label(), Some("Update plugin state"));
+
+        editor.undo();
+        let node = &editor.session.project().nodes[&plugin];
+        assert!(node.state.is_none());
+        assert_eq!(editor.param_value(plugin, &key), None);
     }
 
     #[test]

@@ -427,8 +427,14 @@ impl OdawApp {
 
         ui.separator();
         ui.label("Devices");
+        if node.rack.is_empty() {
+            ui.small("No devices. Add an instrument or effect from Plugins.");
+        } else {
+            ui.small("Signal chain, top to bottom");
+        }
         let devices: Vec<NodeId> = node.rack.iter().copied().collect();
-        for device in devices {
+        let device_count = devices.len();
+        for (index, device) in devices.into_iter().enumerate() {
             let (kind, device_name) = self.editor.session.project().nodes.get(&device).map_or(
                 ("device".to_owned(), "Device".to_owned()),
                 |node| {
@@ -442,14 +448,33 @@ impl OdawApp {
             );
             let is_vst3 = kind.starts_with("vst3:");
             let label = if is_vst3 {
-                format!("{device_name} (VST3)")
+                format!("{}. {device_name} (VST3)", index + 1)
             } else {
-                device_name
+                format!("{}. {device_name}", index + 1)
             };
             egui::CollapsingHeader::new(label)
                 .id_salt(("device", device.raw()))
                 .show(ui, |ui| {
                     ui.small(&kind);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(index > 0, egui::Button::new("Up"))
+                            .on_hover_text("Move earlier in the chain")
+                            .clicked()
+                        {
+                            self.editor.move_device(track, device, -1);
+                        }
+                        if ui
+                            .add_enabled(index + 1 < device_count, egui::Button::new("Down"))
+                            .on_hover_text("Move later in the chain")
+                            .clicked()
+                        {
+                            self.editor.move_device(track, device, 1);
+                        }
+                        if ui.button("Remove").clicked() {
+                            self.editor.remove_device(track, device);
+                        }
+                    });
                     if is_vst3 {
                         ui.horizontal(|ui| {
                             if ui.button("Open editor").clicked() {
@@ -466,6 +491,19 @@ impl OdawApp {
                                 if let Some(mut window) = self.plugin_windows.remove(&device) {
                                     window.close();
                                 }
+                                self.editor.persist_plugin_state();
+                            }
+                            if ui
+                                .button("Save state")
+                                .on_hover_text("Store the current plugin patch in the project")
+                                .clicked()
+                            {
+                                let changed = self.editor.persist_plugin_state();
+                                self.editor.status = Some(if changed {
+                                    "plugin state saved".to_owned()
+                                } else {
+                                    "plugin state is already up to date".to_owned()
+                                });
                             }
                         });
                         let parameters = self.editor.plugin_parameters(device);
