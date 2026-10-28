@@ -86,6 +86,21 @@ fn dispatch_node(command: &NodeCommand, tx: &mut Tx) -> Result<(), DispatchError
             tx.insert_node(*node, value);
             tx.mark_layout_or_latency();
         }
+        NodeCommand::SetTrackOrder { tracks } => {
+            let mut seen = std::collections::BTreeSet::new();
+            for track in tracks {
+                let Some(node) = tx.node(*track) else {
+                    return Err(DispatchError::MissingNode(*track));
+                };
+                if node.role != NodeRole::Track {
+                    return Err(DispatchError::NotATrack(*track));
+                }
+                if !seen.insert(*track) {
+                    return Err(DispatchError::DuplicateTrackOrder(*track));
+                }
+            }
+            tx.set_track_order(tracks.clone());
+        }
         NodeCommand::SetPorts { node, ports } => {
             let Some(mut value) = tx.node(*node).cloned() else {
                 return Err(DispatchError::MissingNode(*node));
@@ -596,6 +611,10 @@ pub enum DispatchError {
     MissingNode(NodeId),
     #[error("node {0} is not a device")]
     NotADevice(NodeId),
+    #[error("node {0} is not a track")]
+    NotATrack(NodeId),
+    #[error("track {0} appears more than once in the track order")]
+    DuplicateTrackOrder(NodeId),
     #[error("node {0} cannot hold a rack")]
     NodeCannotHoldRack(NodeId),
     #[error("edge {0} already exists")]

@@ -38,13 +38,28 @@ impl Snap {
         }
     }
 
-    fn ticks(self) -> i64 {
+    pub(crate) fn ticks(self) -> i64 {
         match self {
             Self::Whole => PPQ * 4,
             Self::Half => PPQ * 2,
             Self::Quarter => PPQ,
             Self::Eighth => PPQ / 2,
             Self::Sixteenth => PPQ / 4,
+        }
+    }
+
+    /// Pick a useful snap division for the current horizontal zoom.
+    pub(crate) fn for_zoom(pixels_per_beat: f32) -> Self {
+        if pixels_per_beat < 40.0 {
+            Self::Whole
+        } else if pixels_per_beat < 80.0 {
+            Self::Half
+        } else if pixels_per_beat < 170.0 {
+            Self::Quarter
+        } else if pixels_per_beat < 340.0 {
+            Self::Eighth
+        } else {
+            Self::Sixteenth
         }
     }
 }
@@ -74,6 +89,7 @@ struct Marquee {
 pub struct PianoRollState {
     pub pixels_per_beat: f32,
     pub snap: Snap,
+    pub auto_snap: bool,
     drag: Option<DragState>,
     marquee: Option<Marquee>,
     active_clip: Option<ClipId>,
@@ -87,6 +103,7 @@ impl Default for PianoRollState {
         Self {
             pixels_per_beat: 90.0,
             snap: Snap::Quarter,
+            auto_snap: true,
             drag: None,
             marquee: None,
             active_clip: None,
@@ -110,6 +127,9 @@ impl PianoRollState {
     pub fn show(&mut self, ui: &mut egui::Ui, editor: &mut Editor) {
         editor.ensure_selection();
         self.controls(ui, editor);
+        if self.auto_snap {
+            self.snap = Snap::for_zoom(self.pixels_per_beat);
+        }
 
         let Some((clip_id, clip)) = editor
             .selected_clip_data()
@@ -172,6 +192,7 @@ impl PianoRollState {
                                 height,
                                 clip.length,
                                 self.pixels_per_beat,
+                                self.snap,
                                 beats_per_bar,
                             );
                             let hovered = ui
@@ -229,9 +250,14 @@ impl PianoRollState {
                 .selected_text(self.snap.label())
                 .show_ui(ui, |ui| {
                     for snap in Snap::ALL {
-                        ui.selectable_value(&mut self.snap, snap, snap.label());
+                        if ui.selectable_label(self.snap == snap, snap.label()).clicked() {
+                            self.snap = snap;
+                            self.auto_snap = false;
+                        }
                     }
                 });
+            ui.checkbox(&mut self.auto_snap, "Auto")
+                .on_hover_text("Follow the zoom level");
             ui.separator();
 
             let selected = editor.session.selection().notes.len();
@@ -328,6 +354,9 @@ impl PianoRollState {
             };
             if (factor - 1.0).abs() > 0.001 {
                 self.pixels_per_beat = (self.pixels_per_beat * factor).clamp(30.0, 500.0);
+                if self.auto_snap {
+                    self.snap = Snap::for_zoom(self.pixels_per_beat);
+                }
                 ui.ctx().request_repaint();
             }
         }
@@ -661,6 +690,7 @@ fn draw_keyboard(painter: &egui::Painter, origin: Pos2, height: f32) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_grid(
     painter: &egui::Painter,
     origin: Pos2,
@@ -668,6 +698,7 @@ fn draw_grid(
     height: f32,
     clip_length: Tick,
     pixels_per_beat: f32,
+    snap: Snap,
     beats_per_bar: i64,
 ) {
     painter.rect_filled(
@@ -710,6 +741,26 @@ fn draw_grid(
                 },
             ),
         );
+    }
+
+    let subdivision = snap.ticks();
+    if subdivision < PPQ {
+        let total = clip_length.raw().max(0);
+        let bar_ticks = beats_per_bar.max(1) * PPQ;
+        let mut tick = subdivision;
+        while tick < total {
+            if tick % PPQ != 0 && tick % bar_ticks != 0 {
+                let x = origin.x + tick as f32 / PPQ as f32 * pixels_per_beat;
+                if x > origin.x + width {
+                    break;
+                }
+                painter.line_segment(
+                    [pos2(x, origin.y), pos2(x, origin.y + height)],
+                    Stroke::new(0.3_f32, Color32::from_rgb(34, 37, 43)),
+                );
+            }
+            tick += subdivision;
+        }
     }
 }
 
@@ -889,6 +940,15 @@ mod tests {
             velocity: 100,
             channel: 0,
         }
+    }
+
+    #[test]
+    fn zoom_chooses_a_sensible_snap() {
+        assert_eq!(Snap::for_zoom(30.0), Snap::Whole);
+        assert_eq!(Snap::for_zoom(60.0), Snap::Half);
+        assert_eq!(Snap::for_zoom(100.0), Snap::Quarter);
+        assert_eq!(Snap::for_zoom(220.0), Snap::Eighth);
+        assert_eq!(Snap::for_zoom(400.0), Snap::Sixteenth);
     }
 
     #[test]

@@ -72,6 +72,8 @@ impl EmptyDrag {
 #[derive(Debug)]
 pub struct TimelineState {
     pub pixels_per_beat: f32,
+    pub snap: Snap,
+    pub auto_snap: bool,
     drag: Option<ClipDrag>,
     marquee: Option<EmptyDrag>,
     seek_drag: Option<Pos2>,
@@ -85,6 +87,8 @@ impl Default for TimelineState {
     fn default() -> Self {
         Self {
             pixels_per_beat: 84.0,
+            snap: Snap::Quarter,
+            auto_snap: true,
             drag: None,
             marquee: None,
             seek_drag: None,
@@ -111,8 +115,10 @@ pub fn show(
     editor: &mut Editor,
     mixer: &mut MixerState,
     state: &mut TimelineState,
-    snap: &mut Snap,
 ) {
+    if state.auto_snap {
+        state.snap = Snap::for_zoom(state.pixels_per_beat);
+    }
     let project = editor.session.project().clone();
     let tracks = track_rows(&project, editor);
     let master = master_node(&project);
@@ -136,12 +142,20 @@ pub fn show(
         ui.separator();
         ui.label("Snap");
         egui::ComboBox::from_id_salt("timeline_snap")
-            .selected_text(snap.label())
+            .selected_text(state.snap.label())
             .show_ui(ui, |ui| {
                 for value in Snap::ALL {
-                    ui.selectable_value(snap, value, value.label());
+                    if ui
+                        .selectable_label(state.snap == value, value.label())
+                        .clicked()
+                    {
+                        state.snap = value;
+                        state.auto_snap = false;
+                    }
                 }
             });
+        ui.checkbox(&mut state.auto_snap, "Auto")
+            .on_hover_text("Follow the zoom level");
         ui.separator();
         ui.small(
             "Click the ruler or empty space to seek · drag empty space to marquee-select · \
@@ -167,11 +181,11 @@ pub fn show(
     ui.horizontal_top(|ui| {
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            ui.allocate_ui_with_layout(
-                vec2(HEADER_WIDTH, RULER_HEIGHT),
+            header_row(
+                ui,
+                RULER_HEIGHT,
                 Layout::left_to_right(Align::Center),
                 |ui| {
-                    ui.set_width(HEADER_WIDTH);
                     ui.add_space(6.0);
                     ui.small(format!("Tracks · {}", tracks.len()));
                 },
@@ -203,6 +217,7 @@ pub fn show(
                     content_width,
                     grid_height,
                     state.pixels_per_beat,
+                    state.snap,
                     total_beats,
                     beats_per_bar,
                     tracks.len(),
@@ -256,7 +271,12 @@ pub fn show(
                 if let Some(position) = pointer {
                     let track = track_at_y(position.y, origin, &tracks);
                     let tick = if position.x >= origin.x {
-                        Some(tick_at(position.x, origin, state.pixels_per_beat, *snap))
+                        Some(tick_at(
+                            position.x,
+                            origin,
+                            state.pixels_per_beat,
+                            state.snap,
+                        ))
                     } else {
                         None
                     };
@@ -283,6 +303,9 @@ pub fn show(
                     };
                     if (factor - 1.0).abs() > 0.001 {
                         state.pixels_per_beat = (state.pixels_per_beat * factor).clamp(24.0, 320.0);
+                        if state.auto_snap {
+                            state.snap = Snap::for_zoom(state.pixels_per_beat);
+                        }
                         ui.ctx().request_repaint();
                     }
                 }
@@ -294,8 +317,12 @@ pub fn show(
                             .iter()
                             .find(|(rect, _, _, _)| rect.contains(position))
                             .map(|(_, track, clip, _)| (*track, *clip));
-                        state.context_tick =
-                            Some(tick_at(position.x, origin, state.pixels_per_beat, *snap));
+                        state.context_tick = Some(tick_at(
+                            position.x,
+                            origin,
+                            state.pixels_per_beat,
+                            state.snap,
+                        ));
                     }
                 }
 
@@ -312,7 +339,8 @@ pub fn show(
 
                         if ruler {
                             state.seek_drag = Some(position);
-                            let tick = tick_at(position.x, origin, state.pixels_per_beat, *snap);
+                            let tick =
+                                tick_at(position.x, origin, state.pixels_per_beat, state.snap);
                             editor.preview_cursor(tick);
                         } else if let Some((rect, track, clip, value)) = hit {
                             if shift {
@@ -367,7 +395,8 @@ pub fn show(
                 if let Some(position) = pointer {
                     if ui.input(|input| input.pointer.primary_down()) {
                         if state.seek_drag.is_some() {
-                            let tick = tick_at(position.x, origin, state.pixels_per_beat, *snap);
+                            let tick =
+                                tick_at(position.x, origin, state.pixels_per_beat, state.snap);
                             editor.preview_cursor(tick);
                         }
                         if let Some(drag) = state.drag.clone() {
@@ -397,8 +426,11 @@ pub fn show(
                                             continue;
                                         };
                                         preview.start = Tick::from_raw(
-                                            snap_tick(original.start.raw() + delta_ticks, *snap)
-                                                .max(0),
+                                            snap_tick(
+                                                original.start.raw() + delta_ticks,
+                                                state.snap,
+                                            )
+                                            .max(0),
                                         );
                                         if let Some(original_index) =
                                             tracks.iter().position(|row| row.id == original.node)
@@ -415,9 +447,11 @@ pub fn show(
                                         drag.originals.iter().find(|(id, _)| *id == drag.primary)
                                     {
                                         let end = original.start.raw() + original.length.raw();
-                                        let start =
-                                            snap_tick(original.start.raw() + delta_ticks, *snap)
-                                                .clamp(0, (end - 1).max(0));
+                                        let start = snap_tick(
+                                            original.start.raw() + delta_ticks,
+                                            state.snap,
+                                        )
+                                        .clamp(0, (end - 1).max(0));
                                         if let Some((_, preview)) =
                                             previews.iter_mut().find(|(id, _)| *id == drag.primary)
                                         {
@@ -436,9 +470,11 @@ pub fn show(
                                     if let Some((_, original)) =
                                         drag.originals.iter().find(|(id, _)| *id == drag.primary)
                                     {
-                                        let length =
-                                            snap_tick(original.length.raw() + delta_ticks, *snap)
-                                                .max(1);
+                                        let length = snap_tick(
+                                            original.length.raw() + delta_ticks,
+                                            state.snap,
+                                        )
+                                        .max(1);
                                         if let Some((_, preview)) =
                                             previews.iter_mut().find(|(id, _)| *id == drag.primary)
                                         {
@@ -500,13 +536,15 @@ pub fn show(
                             }
                         } else if let Some(position) = pointer {
                             editor.clear_clip_selection();
-                            let tick = tick_at(position.x, origin, state.pixels_per_beat, *snap);
+                            let tick =
+                                tick_at(position.x, origin, state.pixels_per_beat, state.snap);
                             editor.set_cursor(tick);
                         }
                     }
                     if state.seek_drag.take().is_some() {
                         if let Some(position) = pointer {
-                            let tick = tick_at(position.x, origin, state.pixels_per_beat, *snap);
+                            let tick =
+                                tick_at(position.x, origin, state.pixels_per_beat, state.snap);
                             editor.set_cursor(tick);
                         }
                     }
@@ -635,6 +673,20 @@ pub fn show(
     });
 }
 
+fn header_row(
+    ui: &mut egui::Ui,
+    height: f32,
+    layout: Layout,
+    contents: impl FnOnce(&mut egui::Ui),
+) {
+    let (rect, _) = ui.allocate_exact_size(vec2(HEADER_WIDTH, height), Sense::hover());
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(layout));
+    child.set_width(HEADER_WIDTH);
+    child.set_clip_rect(rect);
+    child.spacing_mut().item_spacing.y = 0.0;
+    contents(&mut child);
+}
+
 fn track_header(
     ui: &mut egui::Ui,
     editor: &mut Editor,
@@ -643,115 +695,105 @@ fn track_header(
     selected: bool,
     state: &mut TimelineState,
 ) {
-    ui.allocate_ui_with_layout(
-        vec2(HEADER_WIDTH, ROW_HEIGHT),
-        Layout::top_down(Align::Min),
-        |ui| {
-            ui.set_width(HEADER_WIDTH);
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.colored_label(track.color, "■");
-                let response = ui.selectable_label(selected, &track.name);
-                if response.clicked() {
-                    editor.select_track(track.id);
+    header_row(ui, ROW_HEIGHT, Layout::top_down(Align::Min), |ui| {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.colored_label(track.color, "■");
+            let response = ui.selectable_label(selected, &track.name);
+            if response.clicked() {
+                editor.select_track(track.id);
+            }
+            response.context_menu(|ui| {
+                if ui.button("Rename").clicked() {
+                    state.rename_request = Some(track.id);
+                    ui.close();
                 }
-                response.context_menu(|ui| {
-                    if ui.button("Rename").clicked() {
-                        state.rename_request = Some(track.id);
-                        ui.close();
-                    }
-                    ui.menu_button("Color", |ui| {
-                        for color in TRACK_COLORS {
-                            let button = egui::Button::new("   ").fill(rgb(color));
-                            if ui.add(button).clicked() {
-                                editor.set_track_color(track.id, Some(color));
-                                ui.close();
-                            }
-                        }
-                        if ui.button("No color").clicked() {
-                            editor.set_track_color(track.id, None);
+                ui.menu_button("Color", |ui| {
+                    for color in TRACK_COLORS {
+                        let button = egui::Button::new("   ").fill(rgb(color));
+                        if ui.add(button).clicked() {
+                            editor.set_track_color(track.id, Some(color));
                             ui.close();
                         }
-                    });
-                    if ui.button("Add MIDI clip").clicked() {
-                        editor.select_track(track.id);
-                        editor.add_midi_clip();
-                        ui.close();
                     }
-                    ui.separator();
-                    if ui.button("Delete track").clicked() {
-                        editor.delete_track(track.id);
+                    if ui.button("No color").clicked() {
+                        editor.set_track_color(track.id, None);
                         ui.close();
                     }
                 });
+                if ui.button("Add MIDI clip").clicked() {
+                    editor.select_track(track.id);
+                    editor.add_midi_clip();
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Delete track").clicked() {
+                    editor.delete_track(track.id);
+                    ui.close();
+                }
+            });
 
-                let mute = ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new("M").color(Color32::from_rgb(255, 225, 225)),
-                        )
-                        .min_size(vec2(18.0, 18.0))
-                        .fill(if track_muted(track, editor) {
-                            Color32::from_rgb(244, 58, 58)
-                        } else {
-                            Color32::from_rgb(190, 104, 104)
-                        }),
+            let mute = ui
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new("M").color(Color32::from_rgb(255, 225, 225)),
                     )
-                    .on_hover_text("Mute track");
-                if mute.clicked() {
-                    let muted = track_muted(track, editor);
-                    editor.set_track_muted(track.id, !muted);
-                }
-                let solo = ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new("S").color(Color32::from_rgb(220, 235, 255)),
-                        )
-                        .min_size(vec2(18.0, 18.0))
-                        .fill(if track_soloed(track, editor) {
-                            Color32::from_rgb(52, 150, 255)
-                        } else {
-                            Color32::from_rgb(86, 128, 190)
-                        }),
+                    .min_size(vec2(18.0, 18.0))
+                    .fill(if track_muted(track, editor) {
+                        Color32::from_rgb(244, 58, 58)
+                    } else {
+                        Color32::from_rgb(190, 104, 104)
+                    }),
+                )
+                .on_hover_text("Mute track");
+            if mute.clicked() {
+                let muted = track_muted(track, editor);
+                editor.set_track_muted(track.id, !muted);
+            }
+            let solo = ui
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new("S").color(Color32::from_rgb(220, 235, 255)),
                     )
-                    .on_hover_text("Solo track");
-                if solo.clicked() {
-                    let soloed = track_soloed(track, editor);
-                    editor.set_track_soloed(track.id, !soloed);
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                ui.add_space(8.0);
-                mixer.gain(ui, editor, track.id, true);
-                mixer.pan(ui, editor, track.id, true);
-                mixer.meter(ui, editor, track.id);
-            });
-        },
-    );
+                    .min_size(vec2(18.0, 18.0))
+                    .fill(if track_soloed(track, editor) {
+                        Color32::from_rgb(52, 150, 255)
+                    } else {
+                        Color32::from_rgb(86, 128, 190)
+                    }),
+                )
+                .on_hover_text("Solo track");
+            if solo.clicked() {
+                let soloed = track_soloed(track, editor);
+                editor.set_track_soloed(track.id, !soloed);
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.add_space(8.0);
+            mixer.gain(ui, editor, track.id, true);
+            mixer.pan(ui, editor, track.id, true);
+            mixer.meter(ui, editor, track.id);
+        });
+    });
 }
 
 fn master_header(ui: &mut egui::Ui, editor: &mut Editor, mixer: &mut MixerState, master: NodeId) {
-    ui.allocate_ui_with_layout(
-        vec2(HEADER_WIDTH, ROW_HEIGHT),
-        Layout::top_down(Align::Min),
-        |ui| {
-            ui.set_width(HEADER_WIDTH);
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.colored_label(Color32::from_rgb(196, 202, 214), "◆");
-                ui.strong("Master");
-                ui.small("stereo out");
-            });
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                ui.add_space(8.0);
-                mixer.gain(ui, editor, master, true);
-                mixer.pan(ui, editor, master, true);
-                mixer.meter(ui, editor, master);
-            });
-        },
-    );
+    header_row(ui, ROW_HEIGHT, Layout::top_down(Align::Min), |ui| {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.colored_label(Color32::from_rgb(196, 202, 214), "◆");
+            ui.strong("Master");
+            ui.small("stereo out");
+        });
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.add_space(8.0);
+            mixer.gain(ui, editor, master, true);
+            mixer.pan(ui, editor, master, true);
+            mixer.meter(ui, editor, master);
+        });
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -761,6 +803,7 @@ fn draw_grid(
     width: f32,
     height: f32,
     pixels_per_beat: f32,
+    snap: Snap,
     total_beats: i64,
     beats_per_bar: i64,
     track_rows: usize,
@@ -793,46 +836,25 @@ fn draw_grid(
         );
     }
 
-    let subdivisions = if pixels_per_beat >= 220.0 {
-        4
-    } else if pixels_per_beat >= 110.0 {
-        2
-    } else {
-        1
-    };
+    let bar_ticks = beats_per_bar.max(1) * PPQ;
     for beat in 0..=total_beats {
-        for subdivision in 0..subdivisions {
-            if subdivision == 0 && beat == 0 {
-                continue;
-            }
-            let position = beat as f32 + subdivision as f32 / subdivisions as f32;
-            let x = origin.x + position * pixels_per_beat;
-            if x > origin.x + width {
-                break;
-            }
-            let bar = beat % beats_per_bar.max(1) == 0 && subdivision == 0;
-            painter.line_segment(
-                [pos2(x, origin.y + RULER_HEIGHT), pos2(x, origin.y + height)],
-                Stroke::new(
-                    if bar {
-                        1.0_f32
-                    } else if subdivision == 0 {
-                        0.6_f32
-                    } else {
-                        0.3_f32
-                    },
-                    if bar {
-                        Color32::from_rgb(62, 66, 76)
-                    } else if subdivision == 0 {
-                        Color32::from_rgb(42, 46, 53)
-                    } else {
-                        Color32::from_rgb(33, 36, 42)
-                    },
-                ),
-            );
+        let x = origin.x + beat as f32 * pixels_per_beat;
+        if x > origin.x + width {
+            break;
         }
-        if beat % beats_per_bar.max(1) == 0 {
-            let x = origin.x + beat as f32 * pixels_per_beat;
+        let bar = beat % beats_per_bar.max(1) == 0;
+        painter.line_segment(
+            [pos2(x, origin.y + RULER_HEIGHT), pos2(x, origin.y + height)],
+            Stroke::new(
+                if bar { 1.0_f32 } else { 0.6_f32 },
+                if bar {
+                    Color32::from_rgb(62, 66, 76)
+                } else {
+                    Color32::from_rgb(42, 46, 53)
+                },
+            ),
+        );
+        if bar {
             painter.text(
                 pos2(x + 4.0, origin.y + 3.0),
                 Align2::LEFT_TOP,
@@ -840,6 +862,25 @@ fn draw_grid(
                 FontId::monospace(9.0),
                 Color32::from_rgb(145, 151, 164),
             );
+        }
+    }
+
+    let subdivision = snap.ticks();
+    if subdivision < PPQ {
+        let total_ticks = total_beats * PPQ;
+        let mut tick = subdivision;
+        while tick < total_ticks {
+            if tick % PPQ != 0 && tick % bar_ticks != 0 {
+                let x = origin.x + tick as f32 / PPQ as f32 * pixels_per_beat;
+                if x > origin.x + width {
+                    break;
+                }
+                painter.line_segment(
+                    [pos2(x, origin.y + RULER_HEIGHT), pos2(x, origin.y + height)],
+                    Stroke::new(0.3_f32, Color32::from_rgb(33, 36, 42)),
+                );
+            }
+            tick += subdivision;
         }
     }
 }
@@ -983,36 +1024,38 @@ fn draw_waveform(
 
 fn track_rows(project: &Project, editor: &Editor) -> Vec<TrackRow> {
     project
-        .nodes
-        .iter()
-        .filter(|(_, node)| node.role == NodeRole::Track)
-        .map(|(id, node)| TrackRow {
-            id: *id,
-            name: node
-                .name
-                .clone()
-                .unwrap_or_else(|| format!("Track {}", id.raw())),
-            color: track_color(node, *id),
-            clips: node
-                .clips
-                .iter()
-                .filter_map(|clip_id| {
-                    project.clips.get(clip_id).map(|clip| ClipRow {
-                        id: *clip_id,
-                        clip: clip.clone(),
-                        peaks: match &clip.content {
-                            ClipContent::Audio { asset, .. } => editor.audio_peaks(*asset),
-                            ClipContent::Midi { .. } | ClipContent::Empty => None,
-                        },
-                        source_frames: match &clip.content {
-                            ClipContent::Audio { asset, .. } => {
-                                editor.audio_asset(*asset).map(|audio| audio.frames as u64)
-                            }
-                            ClipContent::Midi { .. } | ClipContent::Empty => None,
-                        },
+        .ordered_track_ids()
+        .into_iter()
+        .filter_map(|id| {
+            let node = project.nodes.get(&id)?;
+            Some(TrackRow {
+                id,
+                name: node
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| format!("Track {}", id.raw())),
+                color: track_color(node, id),
+                clips: node
+                    .clips
+                    .iter()
+                    .filter_map(|clip_id| {
+                        project.clips.get(clip_id).map(|clip| ClipRow {
+                            id: *clip_id,
+                            clip: clip.clone(),
+                            peaks: match &clip.content {
+                                ClipContent::Audio { asset, .. } => editor.audio_peaks(*asset),
+                                ClipContent::Midi { .. } | ClipContent::Empty => None,
+                            },
+                            source_frames: match &clip.content {
+                                ClipContent::Audio { asset, .. } => {
+                                    editor.audio_asset(*asset).map(|audio| audio.frames as u64)
+                                }
+                                ClipContent::Midi { .. } | ClipContent::Empty => None,
+                            },
+                        })
                     })
-                })
-                .collect(),
+                    .collect(),
+            })
         })
         .collect()
 }

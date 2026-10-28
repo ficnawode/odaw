@@ -77,6 +77,7 @@ impl From<ProjectDtoV1> for ProjectDto {
                 .into_iter()
                 .map(|(id, node)| (id, node.into()))
                 .collect(),
+            track_order: Vec::new(),
             edges: project.edges,
             clips: project
                 .clips

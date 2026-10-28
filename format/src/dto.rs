@@ -22,6 +22,8 @@ pub struct ProjectDto {
     pub arrangement: Vec<SectionRefDto>,
     pub loops: Vec<LoopRegionDto>,
     pub nodes: BTreeMap<u64, NodeDto>,
+    #[serde(default)]
+    pub track_order: Vec<u64>,
     pub edges: BTreeMap<u64, EdgeDto>,
     pub clips: BTreeMap<u64, ClipDto>,
     pub assets: BTreeMap<String, AssetDto>,
@@ -260,6 +262,7 @@ impl From<&Project> for ProjectDto {
                 .iter()
                 .map(|(id, node)| (id.raw(), NodeDto::from(node)))
                 .collect(),
+            track_order: project.track_order.iter().map(|id| id.raw()).collect(),
             edges: project
                 .edges
                 .iter()
@@ -327,6 +330,7 @@ impl TryFrom<ProjectDto> for Project {
                 .into_iter()
                 .map(|(id, node)| (NodeId::from_raw(id), Node::from(node)))
                 .collect(),
+            track_order: dto.track_order.into_iter().map(NodeId::from_raw).collect(),
             edges: dto
                 .edges
                 .into_iter()

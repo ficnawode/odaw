@@ -52,6 +52,13 @@ impl Container {
                     project: project.into(),
                 }
             }
+            3 => {
+                let project: crate::v3::ProjectDtoV3 = postcard::from_bytes(rest)?;
+                ProjectFile {
+                    format_version: FORMAT_VERSION,
+                    project: project.into(),
+                }
+            }
             FORMAT_VERSION => {
                 let project: crate::dto::ProjectDto = postcard::from_bytes(rest)?;
                 ProjectFile {
@@ -418,6 +425,7 @@ mod tests {
                 .with_ports([Port::output(PortId::from_raw(0), ChannelLayout::Mono)]),
         );
 
+        project.track_order.push_back(track);
         project.nodes.get_mut(&track).unwrap().automation.insert(
             ParamId::new("gain"),
             AutomationLane {

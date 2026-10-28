@@ -18,7 +18,7 @@ pub enum FormatError {
     Validation(#[from] ValidationError),
 }
 
-pub const FORMAT_VERSION: u16 = 3;
+pub const FORMAT_VERSION: u16 = 4;
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProjectFile {

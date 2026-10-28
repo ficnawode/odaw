@@ -174,12 +174,20 @@ impl OdawApp {
                 self.editor.select_all_clips();
             }
         }
-        if !widget_focus && !self.editor.session.selection().notes.is_empty() {
-            let semitones = if shift { 12 } else { 1 };
-            if transpose_up {
-                self.editor.transpose_selected_notes(semitones);
-            } else if transpose_down {
-                self.editor.transpose_selected_notes(-semitones);
+        if !widget_focus {
+            let has_notes = !self.editor.session.selection().notes.is_empty();
+            if has_notes && transpose_up {
+                self.editor
+                    .transpose_selected_notes(if shift { 12 } else { 1 });
+            } else if has_notes && transpose_down {
+                self.editor
+                    .transpose_selected_notes(if shift { -12 } else { -1 });
+            } else if !has_notes && transpose_up {
+                self.editor.move_selected_track(-1);
+                self.timeline.clear();
+            } else if !has_notes && transpose_down {
+                self.editor.move_selected_track(1);
+                self.timeline.clear();
             }
         }
         if home {
@@ -836,7 +844,7 @@ impl OdawApp {
                 ui.label(status);
             } else {
                 ui.label(
-                    "Space play/stop · Ctrl+E split · Ctrl+T time · Ctrl+C/V notes · Up/Down transpose · right-click menus",
+                    "Space play/stop · Ctrl+E split · Ctrl+T time · Ctrl+C/V notes · Up/Down moves tracks or transposes notes · right-click menus",
                 );
             }
             if let Some(clip) = self.editor.selected_clip() {
@@ -948,13 +956,7 @@ impl eframe::App for OdawApp {
                 self.inspector(ui);
             });
         egui::CentralPanel::default().show(ctx, |ui| {
-            timeline::show(
-                ui,
-                &mut self.editor,
-                &mut self.mixer,
-                &mut self.timeline,
-                &mut self.piano_roll.snap,
-            );
+            timeline::show(ui, &mut self.editor, &mut self.mixer, &mut self.timeline);
         });
 
         if let Some(track) = self.timeline.rename_request.take() {

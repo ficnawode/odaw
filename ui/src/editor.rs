@@ -652,6 +652,35 @@ impl Editor {
             .is_some_and(|plugin| window.is_for(&plugin))
     }
 
+    /// Move a track up or down in the display order.
+    pub fn move_track(&mut self, track: NodeId, offset: isize) -> bool {
+        let order = self.session.project().ordered_track_ids();
+        let Some(index) = order.iter().position(|id| *id == track) else {
+            self.error = Some("the track no longer exists".to_owned());
+            return false;
+        };
+        let Some(target) = index.checked_add_signed(offset) else {
+            return false;
+        };
+        if target >= order.len() || target == index {
+            return false;
+        }
+        let mut reordered = order;
+        reordered.remove(index);
+        reordered.insert(target, track);
+        let result = self.session.apply_command(Command::new(CommandKind::Node(
+            NodeCommand::SetTrackOrder { tracks: reordered },
+        )));
+        self.after_edit(result)
+    }
+
+    pub fn move_selected_track(&mut self, offset: isize) -> bool {
+        let Some(track) = self.selected_track() else {
+            return false;
+        };
+        self.move_track(track, offset)
+    }
+
     /// Reorder one device inside its track rack. A source device (an
     /// instrument with no audio input) must remain first.
     pub fn move_device(&mut self, track: NodeId, device: NodeId, offset: isize) -> bool {
@@ -2285,6 +2314,37 @@ mod tests {
             note_clipboard: None,
             vst3: Vst3Backend::new(Catalog::default()),
         }
+    }
+
+    #[test]
+    fn tracks_can_be_reordered_from_the_keyboard_path() {
+        let mut editor = test_editor();
+        let extra = [NodeId::from_raw(100), NodeId::from_raw(101)];
+        editor
+            .session
+            .apply_commands(
+                extra
+                    .into_iter()
+                    .map(|node| {
+                        Command::new(CommandKind::Node(NodeCommand::Add {
+                            node,
+                            value: Box::new(Node::new(NodeRole::Track)),
+                        }))
+                    })
+                    .collect(),
+                "Add tracks",
+            )
+            .unwrap();
+        assert!(editor.move_track(NodeId::from_raw(1), 1));
+        assert_eq!(
+            editor.session.project().ordered_track_ids(),
+            vec![extra[0], NodeId::from_raw(1), extra[1]]
+        );
+        assert!(editor.move_track(NodeId::from_raw(1), -1));
+        assert_eq!(
+            editor.session.project().ordered_track_ids(),
+            vec![NodeId::from_raw(1), extra[0], extra[1]]
+        );
     }
 
     #[test]

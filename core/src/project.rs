@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use thiserror::Error;
 
 use crate::clip::{Asset, Clip, Section, SectionRef};
@@ -23,6 +25,9 @@ pub struct Project {
     pub arrangement: PersistentVector<SectionRef>,
     pub loops: PersistentVector<LoopRegion>,
     pub nodes: PersistentMap<NodeId, Node>,
+    /// UI order for tracks. Missing ids are ignored and unlisted tracks are
+    /// appended in id order, so this is a hint rather than a validation burden.
+    pub track_order: PersistentVector<NodeId>,
     pub edges: PersistentMap<EdgeId, Edge>,
     pub clips: PersistentMap<ClipId, Clip>,
     pub assets: PersistentMap<AssetId, Asset>,
@@ -47,6 +52,7 @@ impl Project {
             arrangement: PersistentVector::new(),
             loops: PersistentVector::new(),
             nodes: PersistentMap::new(),
+            track_order: PersistentVector::new(),
             edges: PersistentMap::new(),
             clips: PersistentMap::new(),
             assets: PersistentMap::new(),
@@ -63,6 +69,30 @@ impl Project {
         )?;
         Ok(self)
     }
+
+    /// Tracks in display order. The explicit order wins, then any track missing
+    /// from it is appended by node id so older projects and newly added tracks
+    /// still show up.
+    pub fn ordered_track_ids(&self) -> Vec<NodeId> {
+        let mut seen = BTreeSet::new();
+        let mut order = Vec::new();
+        for id in &self.track_order {
+            if self
+                .nodes
+                .get(id)
+                .is_some_and(|node| node.role == crate::graph::NodeRole::Track)
+                && seen.insert(*id)
+            {
+                order.push(*id);
+            }
+        }
+        for (id, node) in &self.nodes {
+            if node.role == crate::graph::NodeRole::Track && seen.insert(*id) {
+                order.push(*id);
+            }
+        }
+        order
+    }
 }
 
 #[derive(Debug, Error)]
@@ -74,6 +104,41 @@ pub enum ProjectError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn track_order_falls_back_to_id_order() {
+        let mut project = Project::empty("order", 48_000, 0).unwrap();
+        for id in [3, 1, 2] {
+            project.nodes.insert(
+                NodeId::from_raw(id),
+                Node::new(crate::graph::NodeRole::Track),
+            );
+        }
+        assert_eq!(
+            project.ordered_track_ids(),
+            vec![
+                NodeId::from_raw(1),
+                NodeId::from_raw(2),
+                NodeId::from_raw(3)
+            ]
+        );
+        project.track_order = [
+            NodeId::from_raw(3),
+            NodeId::from_raw(1),
+            NodeId::from_raw(9),
+            NodeId::from_raw(3),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            project.ordered_track_ids(),
+            vec![
+                NodeId::from_raw(3),
+                NodeId::from_raw(1),
+                NodeId::from_raw(2)
+            ]
+        );
+    }
 
     #[test]
     fn empty_project_starts_at_120_bpm_in_four_four() {

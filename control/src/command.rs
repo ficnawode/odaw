@@ -97,6 +97,7 @@ pub enum NodeCommand {
     Remove { node: NodeId },
     Replace { node: NodeId, value: Box<Node> },
     SetRack { node: NodeId, rack: Vec<NodeId> },
+    SetTrackOrder { tracks: Vec<NodeId> },
     SetPorts { node: NodeId, ports: Vec<Port> },
     SetName { node: NodeId, name: Option<String> },
     SetColor { node: NodeId, color: Option<u32> },

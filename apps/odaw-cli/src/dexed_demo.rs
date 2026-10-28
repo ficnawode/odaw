@@ -94,12 +94,14 @@ pub fn create(path: &Path, force: bool) -> Result<(), String> {
 
     let mut next_node = 2u64;
     let mut next_note = 1u64;
+    let mut track_order = Vec::new();
     for (track_index, spec) in track_specs().into_iter().enumerate() {
         let effect = spec.reverb.map(|choice| match choice {
             EffectChoice::Hall => &hall,
             EffectChoice::Plate => &plate,
         });
         let track_id = NodeId::from_raw(next_node);
+        track_order.push(track_id);
         let plugin_id = NodeId::from_raw(next_node + 1);
         next_node += 2;
         let effect_id = effect.map(|_| {
@@ -197,6 +199,7 @@ pub fn create(path: &Path, force: bool) -> Result<(), String> {
         );
     }
 
+    project.track_order = track_order.into_iter().collect();
     Container::new(path)
         .save(&project)
         .map_err(|error| error.to_string())?;

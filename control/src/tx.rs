@@ -73,6 +73,11 @@ impl Tx {
         removed
     }
 
+    pub(crate) fn set_track_order(&mut self, tracks: Vec<NodeId>) {
+        self.project.track_order = tracks.into_iter().collect();
+        self.changes.structural = true;
+    }
+
     pub(crate) fn insert_edge(&mut self, edge: EdgeId, value: Edge) {
         self.project.edges.insert(edge, value);
         self.changes.edges.insert(edge);
