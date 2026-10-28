@@ -954,6 +954,39 @@ impl Editor {
         }
     }
 
+    pub fn plugin_bypassed(&self, node: NodeId) -> bool {
+        self.param_value(node, odaw_vst3::BYPASS_PARAM)
+            .is_some_and(|value| value > 0.5)
+    }
+
+    /// Toggle a host-level bypass. Effects pass their input through; instruments
+    /// go silent. The value lives in `Node.params`, so it persists and is
+    /// undoable like any other parameter.
+    pub fn set_plugin_bypass(&mut self, node: NodeId, bypass: bool) -> bool {
+        let value = if bypass { 1.0 } else { 0.0 };
+        self.preview_param(node, odaw_vst3::BYPASS_PARAM, value);
+        let result =
+            self.session
+                .apply_command(Command::new(CommandKind::Param(ParamCommand::Set {
+                    address: ParamAddress {
+                        node,
+                        param: ParamId::new(odaw_vst3::BYPASS_PARAM),
+                    },
+                    value: ParamValue::Float(value),
+                    change: ParamChange::Value,
+                })));
+        match result {
+            Ok(_) => {
+                self.error = None;
+                true
+            }
+            Err(error) => {
+                self.error = Some(error.to_string());
+                false
+            }
+        }
+    }
+
     pub fn save(&mut self) {
         self.persist_plugin_state();
         let path = self
@@ -2439,6 +2472,12 @@ mod tests {
         };
         let after_add = rack(&editor);
         assert_eq!(after_add.len(), 4);
+        let effect = after_add[2];
+        assert!(!editor.plugin_bypassed(effect));
+        assert!(editor.set_plugin_bypass(effect, true));
+        assert!(editor.plugin_bypassed(effect));
+        assert!(editor.set_plugin_bypass(effect, false));
+        assert!(!editor.plugin_bypassed(effect));
         assert!(editor.move_device(track, after_add[3], -1));
         let reordered = rack(&editor);
         assert_eq!(reordered[2], after_add[3]);

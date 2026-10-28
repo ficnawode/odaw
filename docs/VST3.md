@@ -72,6 +72,12 @@ special-cased in the compiler. Latency accumulates serially, and the existing
 per-edge compensation aligns parallel tracks. Effects can be stacked freely as
 long as each one has one main mono/stereo input and output.
 
+Each VST3 device has a **Bypass/Enable** button in its device panel. Bypass is
+a host-level parameter stored as `Node.params["bypass"]`: effects pass their
+input through untouched, instruments go silent, and entering bypass releases
+held notes. It is value-only, so toggling it does not rebuild the graph, and it
+persists and undoes like any other parameter.
+
 ## Persistent plugin state
 
 `Node.state` is the canonical patch. Three things write it:

@@ -447,7 +447,10 @@ impl OdawApp {
                 },
             );
             let is_vst3 = kind.starts_with("vst3:");
-            let label = if is_vst3 {
+            let bypassed = is_vst3 && self.editor.plugin_bypassed(device);
+            let label = if bypassed {
+                format!("{}. {device_name} (bypassed)", index + 1)
+            } else if is_vst3 {
                 format!("{}. {device_name} (VST3)", index + 1)
             } else {
                 format!("{}. {device_name}", index + 1)
@@ -477,6 +480,18 @@ impl OdawApp {
                     });
                     if is_vst3 {
                         ui.horizontal(|ui| {
+                            let bypass_label = if bypassed { "Enable" } else { "Bypass" };
+                            if ui
+                                .button(bypass_label)
+                                .on_hover_text(if bypassed {
+                                    "Resume plugin processing"
+                                } else {
+                                    "Pass audio through without processing"
+                                })
+                                .clicked()
+                            {
+                                self.editor.set_plugin_bypass(device, !bypassed);
+                            }
                             if ui.button("Open editor").clicked() {
                                 match self.editor.open_plugin_editor(device) {
                                     Ok(window) => {

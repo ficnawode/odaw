@@ -237,6 +237,59 @@ fn render(project: &Project, backend: &Vst3Backend) -> Vec<f32> {
 }
 
 #[test]
+fn bypass_passes_input_through() {
+    let _guard = PLUGIN_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let catalog = Catalog::scan();
+    let Some(entry) = effects(&catalog).first().cloned() else {
+        eprintln!("no VST3 effect is installed; skipping");
+        return;
+    };
+    let backend = Vst3Backend::new(catalog);
+    let node_id = NodeId::from_raw(20);
+    let mut processor = backend
+        .factory()
+        .build(&effect_node(node_id, &entry), &context(node_id))
+        .unwrap();
+    let mut params = ParamBuffer::new();
+    for (id, value) in processor.parameter_defaults() {
+        params.ensure(
+            odaw_core::ParamAddress {
+                node: node_id,
+                param: id,
+            },
+            value,
+        );
+    }
+    params.set(
+        &odaw_core::ParamAddress {
+            node: node_id,
+            param: odaw_core::ParamId::new(odaw_vst3::BYPASS_PARAM),
+        },
+        odaw_core::ParamValue::Float(1.0),
+    );
+
+    let frames = 4;
+    let input = vec![0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7, -0.8];
+    let mut output = vec![0.0; frames * 2];
+    let mut block = Block {
+        node: node_id,
+        event_target: None,
+        sample_rate: 48_000,
+        channels: 2,
+        start_frame: 0,
+        frames,
+        input: &input,
+        output: &mut output,
+        params: &params,
+        events: &[],
+    };
+    processor.process(&mut block);
+    assert_eq!(output, input);
+}
+
+#[test]
 fn two_effects_stack_in_a_project_render() {
     let _guard = PLUGIN_TEST_LOCK
         .lock()

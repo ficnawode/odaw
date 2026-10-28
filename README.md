@@ -77,7 +77,8 @@ What works today:
   is added as a new track and an effect is appended to the selected track's
   rack. The device list is the serial signal chain: effects can be reordered or
   removed, and each VST3 device exposes a generic normalized parameter panel, a
-  floating editor window, and explicit state capture. Saving and closing an
+  floating editor window, explicit state capture, and a host-level
+  bypass/enable toggle. Saving and closing an
   editor persist component/controller state and current parameters into the
   project.
 - `odaw`: a CLI for create, inspect, rename, demo, validate, render, play, and

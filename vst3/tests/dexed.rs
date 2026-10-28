@@ -93,6 +93,60 @@ fn dexed_instrument_processes_a_note() {
 }
 
 #[test]
+fn a_bypassed_instrument_goes_silent() {
+    let _guard = guard();
+    let Some(catalog) = dexed_catalog() else {
+        eprintln!("Dexed is not installed; skipping");
+        return;
+    };
+    let backend = Vst3Backend::new(catalog);
+    let node_id = NodeId::from_raw(1);
+    let node = Node::device(odaw_core::NodeKind::new(format!("vst3:{DEXED}")));
+    let context = DeviceContext::new(node_id, 48_000, 256, 2, 120.0);
+    let mut processor = backend.factory().build(&node, &context).unwrap();
+    let mut params = ParamBuffer::new();
+    for (id, value) in processor.parameter_defaults() {
+        params.ensure(
+            ParamAddress {
+                node: node_id,
+                param: id,
+            },
+            value,
+        );
+    }
+    params.set(
+        &ParamAddress {
+            node: node_id,
+            param: ParamId::new(odaw_vst3::BYPASS_PARAM),
+        },
+        ParamValue::Float(1.0),
+    );
+    let events = [NoteEvent {
+        target: node_id,
+        frame: 0,
+        kind: NoteEventKind::On,
+        pitch: 60,
+        velocity: 100,
+    }];
+    let input = vec![0.0; 256 * 2];
+    let mut output = vec![1.0; 256 * 2];
+    let mut block = Block {
+        node: node_id,
+        event_target: Some(node_id),
+        sample_rate: 48_000,
+        channels: 2,
+        start_frame: 0,
+        frames: 256,
+        input: &input,
+        output: &mut output,
+        params: &params,
+        events: &events,
+    };
+    processor.process(&mut block);
+    assert!(output.iter().all(|sample| *sample == 0.0));
+}
+
+#[test]
 fn state_is_saved_and_restored() {
     let _guard = guard();
     let Some(catalog) = dexed_catalog() else {

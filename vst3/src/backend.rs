@@ -15,6 +15,7 @@ use vst3_host::{Plugin, Vst3Host};
 use crate::catalog::{Catalog, PluginEntry, class_id_from_kind};
 
 pub const PARAM_PREFIX: &str = "param.";
+pub const BYPASS_PARAM: &str = "bypass";
 
 /// Loading several plugin modules concurrently is not reliable across all
 /// vendor factories. Compilation is control-thread work, so serialise it.
@@ -416,6 +417,8 @@ struct ParamSlot {
 
 pub struct Vst3Processor {
     node: NodeId,
+    bypass: ParamAddress,
+    bypassed: bool,
     plugin: Arc<Mutex<Plugin>>,
     info: PluginEntry,
     params: Vec<ParamSlot>,
@@ -480,6 +483,11 @@ impl Vst3Processor {
         let accepts_notes = has_midi_input || info.is_instrument();
         Ok(Self {
             node: context.node,
+            bypass: ParamAddress {
+                node: context.node,
+                param: ParamId::new(BYPASS_PARAM),
+            },
+            bypassed: false,
             plugin,
             info,
             params,
@@ -500,6 +508,7 @@ impl Vst3Processor {
     fn bind_node(&mut self, node: NodeId) {
         if self.node != node {
             self.node = node;
+            self.bypass.node = node;
             for parameter in &mut self.params {
                 parameter.address.node = node;
                 parameter.slot = None;
@@ -583,6 +592,44 @@ impl Vst3Processor {
         }
     }
 
+    fn copy_bypass(&mut self, block: &mut Block<'_>) {
+        let frames = block.frames;
+        let project_channels = block.channels;
+        let source_channels = self.plugin_input_channels;
+        if source_channels == 0 {
+            block.output.fill(0.0);
+            return;
+        }
+        for frame in 0..frames {
+            for channel in 0..project_channels {
+                let sample = match (source_channels, project_channels) {
+                    (1, _) => self.buffers.inputs[0][frame],
+                    (2, 1) => (self.buffers.inputs[0][frame] + self.buffers.inputs[1][frame]) * 0.5,
+                    (_, _) if channel < source_channels => self.buffers.inputs[channel][frame],
+                    _ => self.buffers.inputs[0][frame],
+                };
+                block.output[frame * project_channels + channel] = sample;
+            }
+        }
+    }
+
+    fn release_all_notes(&self) {
+        let plugin_handle = Arc::clone(&self.plugin);
+        let Ok(mut plugin) = plugin_handle.lock() else {
+            return;
+        };
+        for index in 0..16 {
+            let Some(channel) = MidiChannel::from_index(index) else {
+                continue;
+            };
+            let _ = plugin.send_midi_event(MidiEvent::ControlChange {
+                channel,
+                controller: 123,
+                value: 0,
+            });
+        }
+    }
+
     fn copy_output(&mut self, block: &mut Block<'_>) {
         let frames = block.frames;
         let project_channels = block.channels;
@@ -612,7 +659,8 @@ impl DeviceProcessor for Vst3Processor {
     }
 
     fn parameter_defaults(&self) -> Vec<(ParamId, ParamValue)> {
-        self.params
+        let mut defaults: Vec<(ParamId, ParamValue)> = self
+            .params
             .iter()
             .map(|parameter| {
                 (
@@ -620,16 +668,36 @@ impl DeviceProcessor for Vst3Processor {
                     ParamValue::Float(parameter.default),
                 )
             })
-            .collect()
+            .collect();
+        defaults.push((
+            ParamId::new(BYPASS_PARAM),
+            ParamValue::Float(f64::from(u8::from(self.bypassed))),
+        ));
+        defaults
     }
 
     fn process(&mut self, block: &mut Block<'_>) {
         self.bind_node(block.node);
+        let frames = block.frames;
+        let bypassed = block.params.float(&self.bypass, 0.0) > 0.5;
+        if bypassed {
+            if !self.bypassed {
+                self.release_all_notes();
+            }
+            self.bypassed = true;
+            if frames == 0 {
+                block.output.fill(0.0);
+                return;
+            }
+            self.copy_input(block);
+            self.copy_bypass(block);
+            return;
+        }
+        self.bypassed = false;
         if self.failed {
             block.output.fill(0.0);
             return;
         }
-        let frames = block.frames;
         if frames == 0 {
             block.output.fill(0.0);
             return;

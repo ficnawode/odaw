@@ -13,7 +13,9 @@ use odaw_core::NodeId;
 use vst3_host::Plugin;
 use vst3_host::window::PluginWindow;
 
-pub use backend::{MissingPlugin, PARAM_PREFIX, Vst3Backend, Vst3Factory, Vst3Processor};
+pub use backend::{
+    BYPASS_PARAM, MissingPlugin, PARAM_PREFIX, Vst3Backend, Vst3Factory, Vst3Processor,
+};
 pub use catalog::{Catalog, KIND_PREFIX, PluginEntry, class_id_from_kind};
 
 /// Standalone plugin editor window. Editors are floating native windows; odaw
