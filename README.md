@@ -63,11 +63,12 @@ What works today:
   collapsible/resizable piano roll adds a note on a tap, marquee-selects on a
   drag, and edits note groups with move, transpose, copy/paste, and duplicate.
   It also has note resize, right-click menus, snap, trackpad zoom, undo, and
-  redo. Snap follows the horizontal zoom in both the arrangement and piano roll
-  (turn off **Auto** to pin a division), Up/Down transposes selected notes or
-  moves the selected track when no notes are selected, and the track headers
-  share the timeline row height. Click the ruler or empty timeline to seek the
-  red cursor; Ctrl+E splits
+  redo. Snap follows the horizontal zoom from 1/1 down to 1/128 in both the
+  arrangement and piano roll; **Snap** turns it on/off and **1/3** switches to
+  triplet divisions. Faint guide lines track the active division. Up/Down
+  transposes selected notes or moves the selected track when no notes are
+  selected, and the track headers share the timeline row height. Click the
+  ruler or empty timeline to seek the red cursor; Ctrl+E splits
   the selection at the cursor. Tempo is editable in the transport; the Time
   dialog (Ctrl+T or the `Time` button) sets the bar/beat position, tempo, and
   time signature. Audio files

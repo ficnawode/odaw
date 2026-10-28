@@ -8,7 +8,7 @@ use odaw_core::{Clip, ClipContent, ClipId, Frames, Node, NodeId, NodeRole, PPQ, 
 
 use crate::editor::{Editor, TRACK_COLORS};
 use crate::mixer::MixerState;
-use crate::piano_roll::{Snap, snap_tick};
+use crate::piano_roll::SnapSettings;
 
 const ROW_HEIGHT: f32 = 58.0;
 const HEADER_WIDTH: f32 = 215.0;
@@ -72,8 +72,7 @@ impl EmptyDrag {
 #[derive(Debug)]
 pub struct TimelineState {
     pub pixels_per_beat: f32,
-    pub snap: Snap,
-    pub auto_snap: bool,
+    pub(crate) snap: SnapSettings,
     drag: Option<ClipDrag>,
     marquee: Option<EmptyDrag>,
     seek_drag: Option<Pos2>,
@@ -87,8 +86,7 @@ impl Default for TimelineState {
     fn default() -> Self {
         Self {
             pixels_per_beat: 84.0,
-            snap: Snap::Quarter,
-            auto_snap: true,
+            snap: SnapSettings::at_zoom(84.0),
             drag: None,
             marquee: None,
             seek_drag: None,
@@ -116,9 +114,7 @@ pub fn show(
     mixer: &mut MixerState,
     state: &mut TimelineState,
 ) {
-    if state.auto_snap {
-        state.snap = Snap::for_zoom(state.pixels_per_beat);
-    }
+    state.snap.update_zoom(state.pixels_per_beat);
     let project = editor.session.project().clone();
     let tracks = track_rows(&project, editor);
     let master = master_node(&project);
@@ -138,24 +134,17 @@ pub fn show(
         }
         ui.separator();
         ui.label("Zoom");
-        ui.add(egui::Slider::new(&mut state.pixels_per_beat, 24.0..=320.0).show_value(false));
+        ui.add(
+            egui::Slider::new(&mut state.pixels_per_beat, 16.0..=4096.0)
+                .logarithmic(true)
+                .show_value(false),
+        );
         ui.separator();
-        ui.label("Snap");
-        egui::ComboBox::from_id_salt("timeline_snap")
-            .selected_text(state.snap.label())
-            .show_ui(ui, |ui| {
-                for value in Snap::ALL {
-                    if ui
-                        .selectable_label(state.snap == value, value.label())
-                        .clicked()
-                    {
-                        state.snap = value;
-                        state.auto_snap = false;
-                    }
-                }
-            });
-        ui.checkbox(&mut state.auto_snap, "Auto")
-            .on_hover_text("Follow the zoom level");
+        ui.checkbox(&mut state.snap.enabled, "Snap")
+            .on_hover_text("Turn grid snapping on or off");
+        ui.checkbox(&mut state.snap.triplets, "1/3")
+            .on_hover_text("Use triplet divisions");
+        ui.small(state.snap.label());
         ui.separator();
         ui.small(
             "Click the ruler or empty space to seek · drag empty space to marquee-select · \
@@ -302,10 +291,9 @@ pub fn show(
                         1.0
                     };
                     if (factor - 1.0).abs() > 0.001 {
-                        state.pixels_per_beat = (state.pixels_per_beat * factor).clamp(24.0, 320.0);
-                        if state.auto_snap {
-                            state.snap = Snap::for_zoom(state.pixels_per_beat);
-                        }
+                        state.pixels_per_beat =
+                            (state.pixels_per_beat * factor).clamp(16.0, 4096.0);
+                        state.snap.update_zoom(state.pixels_per_beat);
                         ui.ctx().request_repaint();
                     }
                 }
@@ -426,11 +414,10 @@ pub fn show(
                                             continue;
                                         };
                                         preview.start = Tick::from_raw(
-                                            snap_tick(
-                                                original.start.raw() + delta_ticks,
-                                                state.snap,
-                                            )
-                                            .max(0),
+                                            state
+                                                .snap
+                                                .snap(original.start.raw() + delta_ticks)
+                                                .max(0),
                                         );
                                         if let Some(original_index) =
                                             tracks.iter().position(|row| row.id == original.node)
@@ -447,11 +434,10 @@ pub fn show(
                                         drag.originals.iter().find(|(id, _)| *id == drag.primary)
                                     {
                                         let end = original.start.raw() + original.length.raw();
-                                        let start = snap_tick(
-                                            original.start.raw() + delta_ticks,
-                                            state.snap,
-                                        )
-                                        .clamp(0, (end - 1).max(0));
+                                        let start = state
+                                            .snap
+                                            .snap(original.start.raw() + delta_ticks)
+                                            .clamp(0, (end - 1).max(0));
                                         if let Some((_, preview)) =
                                             previews.iter_mut().find(|(id, _)| *id == drag.primary)
                                         {
@@ -470,11 +456,10 @@ pub fn show(
                                     if let Some((_, original)) =
                                         drag.originals.iter().find(|(id, _)| *id == drag.primary)
                                     {
-                                        let length = snap_tick(
-                                            original.length.raw() + delta_ticks,
-                                            state.snap,
-                                        )
-                                        .max(1);
+                                        let length = state
+                                            .snap
+                                            .snap(original.length.raw() + delta_ticks)
+                                            .max(1);
                                         if let Some((_, preview)) =
                                             previews.iter_mut().find(|(id, _)| *id == drag.primary)
                                         {
@@ -803,7 +788,7 @@ fn draw_grid(
     width: f32,
     height: f32,
     pixels_per_beat: f32,
-    snap: Snap,
+    snap: SnapSettings,
     total_beats: i64,
     beats_per_bar: i64,
     track_rows: usize,
@@ -866,7 +851,7 @@ fn draw_grid(
     }
 
     let subdivision = snap.ticks();
-    if subdivision < PPQ {
+    if snap.enabled {
         let total_ticks = total_beats * PPQ;
         let mut tick = subdivision;
         while tick < total_ticks {
@@ -877,7 +862,7 @@ fn draw_grid(
                 }
                 painter.line_segment(
                     [pos2(x, origin.y + RULER_HEIGHT), pos2(x, origin.y + height)],
-                    Stroke::new(0.3_f32, Color32::from_rgb(33, 36, 42)),
+                    Stroke::new(0.3_f32, Color32::from_rgb(38, 42, 50)),
                 );
             }
             tick += subdivision;
@@ -1169,9 +1154,9 @@ fn trim_audio_end(available: Option<i64>, original: &Clip, preview: &mut Clip, n
     }
 }
 
-fn tick_at(x: f32, origin: Pos2, pixels_per_beat: f32, snap: Snap) -> Tick {
+fn tick_at(x: f32, origin: Pos2, pixels_per_beat: f32, snap: SnapSettings) -> Tick {
     let raw = ((x - origin.x) / pixels_per_beat * PPQ as f32).round() as i64;
-    Tick::from_raw(snap_tick(raw.max(0), snap))
+    Tick::from_raw(snap.snap(raw.max(0)))
 }
 
 fn clip_rect(clip: &Clip, origin: Pos2, row_y: f32, pixels_per_beat: f32) -> Rect {

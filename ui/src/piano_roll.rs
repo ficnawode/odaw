@@ -11,23 +11,18 @@ const ROW_HEIGHT: f32 = 14.0;
 const KEY_WIDTH: f32 = 48.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Snap {
+pub(crate) enum Snap {
     Whole,
     Half,
     Quarter,
     Eighth,
     Sixteenth,
+    ThirtySecond,
+    SixtyFourth,
+    HundredTwentyEighth,
 }
 
 impl Snap {
-    pub(crate) const ALL: [Self; 5] = [
-        Self::Whole,
-        Self::Half,
-        Self::Quarter,
-        Self::Eighth,
-        Self::Sixteenth,
-    ];
-
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Whole => "1/1",
@@ -35,6 +30,9 @@ impl Snap {
             Self::Quarter => "1/4",
             Self::Eighth => "1/8",
             Self::Sixteenth => "1/16",
+            Self::ThirtySecond => "1/32",
+            Self::SixtyFourth => "1/64",
+            Self::HundredTwentyEighth => "1/128",
         }
     }
 
@@ -45,6 +43,9 @@ impl Snap {
             Self::Quarter => PPQ,
             Self::Eighth => PPQ / 2,
             Self::Sixteenth => PPQ / 4,
+            Self::ThirtySecond => PPQ / 8,
+            Self::SixtyFourth => PPQ / 16,
+            Self::HundredTwentyEighth => PPQ / 32,
         }
     }
 
@@ -58,8 +59,71 @@ impl Snap {
             Self::Quarter
         } else if pixels_per_beat < 340.0 {
             Self::Eighth
-        } else {
+        } else if pixels_per_beat < 680.0 {
             Self::Sixteenth
+        } else if pixels_per_beat < 1360.0 {
+            Self::ThirtySecond
+        } else if pixels_per_beat < 2720.0 {
+            Self::SixtyFourth
+        } else {
+            Self::HundredTwentyEighth
+        }
+    }
+}
+
+/// Auto zoom division plus the two user switches. A disabled snap returns raw
+/// ticks; triplets scale the straight division by 2/3.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SnapSettings {
+    pub division: Snap,
+    pub triplets: bool,
+    pub enabled: bool,
+}
+
+impl Default for SnapSettings {
+    fn default() -> Self {
+        Self {
+            division: Snap::Quarter,
+            triplets: false,
+            enabled: true,
+        }
+    }
+}
+
+impl SnapSettings {
+    pub(crate) fn at_zoom(pixels_per_beat: f32) -> Self {
+        Self {
+            division: Snap::for_zoom(pixels_per_beat),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn update_zoom(&mut self, pixels_per_beat: f32) {
+        self.division = Snap::for_zoom(pixels_per_beat);
+    }
+
+    pub(crate) fn ticks(self) -> i64 {
+        let ticks = self.division.ticks();
+        if self.triplets {
+            (ticks * 2 / 3).max(1)
+        } else {
+            ticks
+        }
+    }
+
+    pub(crate) fn snap(self, tick: i64) -> i64 {
+        if !self.enabled {
+            return tick;
+        }
+        let step = self.ticks().max(1);
+        ((tick as f64 / step as f64).round() as i64) * step
+    }
+
+    pub(crate) fn label(self) -> String {
+        if self.triplets {
+            format!("{}T", self.division.label())
+        } else {
+            self.division.label().to_owned()
         }
     }
 }
@@ -88,8 +152,7 @@ struct Marquee {
 #[derive(Debug)]
 pub struct PianoRollState {
     pub pixels_per_beat: f32,
-    pub snap: Snap,
-    pub auto_snap: bool,
+    pub(crate) snap: SnapSettings,
     drag: Option<DragState>,
     marquee: Option<Marquee>,
     active_clip: Option<ClipId>,
@@ -102,8 +165,7 @@ impl Default for PianoRollState {
     fn default() -> Self {
         Self {
             pixels_per_beat: 90.0,
-            snap: Snap::Quarter,
-            auto_snap: true,
+            snap: SnapSettings::at_zoom(90.0),
             drag: None,
             marquee: None,
             active_clip: None,
@@ -127,9 +189,7 @@ impl PianoRollState {
     pub fn show(&mut self, ui: &mut egui::Ui, editor: &mut Editor) {
         editor.ensure_selection();
         self.controls(ui, editor);
-        if self.auto_snap {
-            self.snap = Snap::for_zoom(self.pixels_per_beat);
-        }
+        self.snap.update_zoom(self.pixels_per_beat);
 
         let Some((clip_id, clip)) = editor
             .selected_clip_data()
@@ -243,21 +303,17 @@ impl PianoRollState {
     fn controls(&mut self, ui: &mut egui::Ui, editor: &mut Editor) {
         ui.horizontal_wrapped(|ui| {
             ui.label("Zoom");
-            ui.add(egui::Slider::new(&mut self.pixels_per_beat, 30.0..=500.0).show_value(false));
+            ui.add(
+                egui::Slider::new(&mut self.pixels_per_beat, 16.0..=4096.0)
+                    .logarithmic(true)
+                    .show_value(false),
+            );
             ui.separator();
-            ui.label("Snap");
-            egui::ComboBox::from_id_salt("piano_roll_snap")
-                .selected_text(self.snap.label())
-                .show_ui(ui, |ui| {
-                    for snap in Snap::ALL {
-                        if ui.selectable_label(self.snap == snap, snap.label()).clicked() {
-                            self.snap = snap;
-                            self.auto_snap = false;
-                        }
-                    }
-                });
-            ui.checkbox(&mut self.auto_snap, "Auto")
-                .on_hover_text("Follow the zoom level");
+            ui.checkbox(&mut self.snap.enabled, "Snap")
+                .on_hover_text("Turn grid snapping on or off");
+            ui.checkbox(&mut self.snap.triplets, "1/3")
+                .on_hover_text("Use triplet divisions");
+            ui.small(self.snap.label());
             ui.separator();
 
             let selected = editor.session.selection().notes.len();
@@ -353,10 +409,8 @@ impl PianoRollState {
                 1.0
             };
             if (factor - 1.0).abs() > 0.001 {
-                self.pixels_per_beat = (self.pixels_per_beat * factor).clamp(30.0, 500.0);
-                if self.auto_snap {
-                    self.snap = Snap::for_zoom(self.pixels_per_beat);
-                }
+                self.pixels_per_beat = (self.pixels_per_beat * factor).clamp(16.0, 4096.0);
+                self.snap.update_zoom(self.pixels_per_beat);
                 ui.ctx().request_repaint();
             }
         }
@@ -456,7 +510,7 @@ impl PianoRollState {
                 } else {
                     let tick = x_to_tick(marquee.start.x - origin.x, px_per_tick);
                     let max_start = (clip.length.raw() - 1).max(0);
-                    let start = snap_tick(tick, self.snap).clamp(0, max_start);
+                    let start = self.snap.snap(tick).clamp(0, max_start);
                     let pitch = y_to_pitch(marquee.start.y - origin.y);
                     let length = self
                         .snap
@@ -613,8 +667,9 @@ impl PianoRollState {
             } else {
                 if let (Some(tick), Some(pitch)) = (context_tick, context_pitch) {
                     if ui.button("Add note here").clicked() {
-                        let start =
-                            snap_tick(tick.raw(), snap).clamp(0, (clip.length.raw() - 1).max(0));
+                        let start = snap
+                            .snap(tick.raw())
+                            .clamp(0, (clip.length.raw() - 1).max(0));
                         let length = snap.ticks().min((clip.length.raw() - start).max(1)).max(1);
                         editor.add_note(
                             clip_id,
@@ -698,7 +753,7 @@ fn draw_grid(
     height: f32,
     clip_length: Tick,
     pixels_per_beat: f32,
-    snap: Snap,
+    snap: SnapSettings,
     beats_per_bar: i64,
 ) {
     painter.rect_filled(
@@ -744,7 +799,7 @@ fn draw_grid(
     }
 
     let subdivision = snap.ticks();
-    if subdivision < PPQ {
+    if snap.enabled {
         let total = clip_length.raw().max(0);
         let bar_ticks = beats_per_bar.max(1) * PPQ;
         let mut tick = subdivision;
@@ -756,7 +811,7 @@ fn draw_grid(
                 }
                 painter.line_segment(
                     [pos2(x, origin.y), pos2(x, origin.y + height)],
-                    Stroke::new(0.3_f32, Color32::from_rgb(34, 37, 43)),
+                    Stroke::new(0.3_f32, Color32::from_rgb(38, 42, 50)),
                 );
             }
             tick += subdivision;
@@ -848,7 +903,7 @@ fn moved_notes(
     delta_ticks: i64,
     delta_pitch: i32,
     clip_length: Tick,
-    snap: Snap,
+    snap: SnapSettings,
 ) -> Vec<Note> {
     let Some(min_start) = notes.iter().map(|note| note.start.raw()).min() else {
         return Vec::new();
@@ -871,7 +926,7 @@ fn moved_notes(
 
     let lower_ticks = -min_start;
     let upper_ticks = (clip_length.raw() - max_end).max(lower_ticks);
-    let delta_ticks = snap_tick(delta_ticks, snap).clamp(lower_ticks, upper_ticks);
+    let delta_ticks = snap.snap(delta_ticks).clamp(lower_ticks, upper_ticks);
     let delta_pitch = delta_pitch.clamp(-min_pitch, 127 - max_pitch);
 
     notes
@@ -884,8 +939,9 @@ fn moved_notes(
         .collect()
 }
 
-fn resized_note(note: Note, delta_ticks: i64, clip_length: Tick, snap: Snap) -> Note {
-    let length = snap_tick(note.length.raw() + delta_ticks, snap)
+fn resized_note(note: Note, delta_ticks: i64, clip_length: Tick, snap: SnapSettings) -> Note {
+    let length = snap
+        .snap(note.length.raw() + delta_ticks)
         .max(snap.ticks())
         .min((clip_length.raw() - note.start.raw()).max(1));
     Note {
@@ -896,11 +952,6 @@ fn resized_note(note: Note, delta_ticks: i64, clip_length: Tick, snap: Snap) -> 
 
 fn x_to_tick(x: f32, px_per_tick: f32) -> i64 {
     (x / px_per_tick).round() as i64
-}
-
-pub(crate) fn snap_tick(tick: i64, snap: Snap) -> i64 {
-    let step = snap.ticks();
-    ((tick as f64 / step as f64).round() as i64) * step
 }
 
 fn pitch_to_y(pitch: u8) -> f32 {
@@ -942,6 +993,14 @@ mod tests {
         }
     }
 
+    fn settings(division: Snap) -> SnapSettings {
+        SnapSettings {
+            division,
+            triplets: false,
+            enabled: true,
+        }
+    }
+
     #[test]
     fn zoom_chooses_a_sensible_snap() {
         assert_eq!(Snap::for_zoom(30.0), Snap::Whole);
@@ -949,14 +1008,29 @@ mod tests {
         assert_eq!(Snap::for_zoom(100.0), Snap::Quarter);
         assert_eq!(Snap::for_zoom(220.0), Snap::Eighth);
         assert_eq!(Snap::for_zoom(400.0), Snap::Sixteenth);
+        assert_eq!(Snap::for_zoom(1000.0), Snap::ThirtySecond);
+        assert_eq!(Snap::for_zoom(2000.0), Snap::SixtyFourth);
+        assert_eq!(Snap::for_zoom(3000.0), Snap::HundredTwentyEighth);
     }
 
     #[test]
     fn snapping_rounds_to_the_nearest_step() {
-        assert_eq!(snap_tick(0, Snap::Quarter), 0);
-        assert_eq!(snap_tick(PPQ / 2, Snap::Quarter), PPQ);
-        assert_eq!(snap_tick(PPQ / 4, Snap::Quarter), 0);
-        assert_eq!(snap_tick(PPQ, Snap::Eighth), PPQ);
+        assert_eq!(settings(Snap::Quarter).snap(0), 0);
+        assert_eq!(settings(Snap::Quarter).snap(PPQ / 2), PPQ);
+        assert_eq!(settings(Snap::Quarter).snap(PPQ / 4), 0);
+        assert_eq!(settings(Snap::Eighth).snap(PPQ), PPQ);
+    }
+
+    #[test]
+    fn snap_can_be_disabled_and_triplets_are_thirds() {
+        let mut spec = settings(Snap::Quarter);
+        spec.enabled = false;
+        assert_eq!(spec.snap(PPQ / 3), PPQ / 3);
+        spec.enabled = true;
+        spec.triplets = true;
+        assert_eq!(spec.ticks(), PPQ * 2 / 3);
+        assert_eq!(spec.snap(PPQ / 3), PPQ * 2 / 3);
+        assert_eq!(spec.snap(PPQ * 2 / 3), PPQ * 2 / 3);
     }
 
     #[test]
@@ -968,13 +1042,25 @@ mod tests {
         second.pitch = 64;
         let group = [first, second];
 
-        let moved = moved_notes(&group, PPQ, 2, Tick::from_raw(4 * PPQ), Snap::Quarter);
+        let moved = moved_notes(
+            &group,
+            PPQ,
+            2,
+            Tick::from_raw(4 * PPQ),
+            settings(Snap::Quarter),
+        );
         assert_eq!(moved[0].start, Tick::from_raw(2 * PPQ));
         assert_eq!(moved[1].start, Tick::from_raw(3 * PPQ));
         assert_eq!(moved[0].pitch, 62);
         assert_eq!(moved[1].pitch, 66);
 
-        let moved = moved_notes(&group, -PPQ * 8, 2, Tick::from_raw(4 * PPQ), Snap::Quarter);
+        let moved = moved_notes(
+            &group,
+            -PPQ * 8,
+            2,
+            Tick::from_raw(4 * PPQ),
+            settings(Snap::Quarter),
+        );
         assert_eq!(moved[0].start, Tick::ZERO);
         assert_eq!(moved[1].start, Tick::from_raw(PPQ));
 
@@ -983,7 +1069,7 @@ mod tests {
             PPQ * 8,
             -100,
             Tick::from_raw(4 * PPQ),
-            Snap::Quarter,
+            settings(Snap::Quarter),
         );
         assert_eq!(moved[0].start, Tick::from_raw(2 * PPQ));
         assert_eq!(moved[1].start, Tick::from_raw(3 * PPQ));
@@ -993,9 +1079,19 @@ mod tests {
 
     #[test]
     fn resizing_keeps_a_positive_length() {
-        let resized = resized_note(note(), -PPQ * 4, Tick::from_raw(PPQ * 4), Snap::Quarter);
+        let resized = resized_note(
+            note(),
+            -PPQ * 4,
+            Tick::from_raw(PPQ * 4),
+            settings(Snap::Quarter),
+        );
         assert_eq!(resized.length, Tick::from_raw(PPQ));
-        let resized = resized_note(note(), PPQ * 2, Tick::from_raw(PPQ * 4), Snap::Quarter);
+        let resized = resized_note(
+            note(),
+            PPQ * 2,
+            Tick::from_raw(PPQ * 4),
+            settings(Snap::Quarter),
+        );
         assert_eq!(resized.length, Tick::from_raw(PPQ * 3));
     }
 
