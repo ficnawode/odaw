@@ -1,4 +1,5 @@
 use std::num::NonZeroUsize;
+use std::sync::Mutex;
 
 use odaw_compile::Compiler;
 use odaw_core::{
@@ -11,6 +12,14 @@ use odaw_render::{RenderOptions, render_project_with_compiler};
 use odaw_vst3::{Catalog, Vst3Backend};
 
 const DEXED: &str = "ABCDEF019182FAEB4447534244657864";
+
+static PLUGIN_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn guard() -> std::sync::MutexGuard<'static, ()> {
+    PLUGIN_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn project_with_dexed() -> Project {
     let mut project = Project::empty("dexed", 48_000, 0).unwrap();
@@ -81,6 +90,7 @@ fn project_with_dexed() -> Project {
 
 #[test]
 fn plugin_identity_and_state_round_trip_through_the_container() {
+    let _guard = guard();
     let catalog = Catalog::scan();
     if catalog.get(DEXED).is_none() {
         eprintln!("Dexed is not installed; skipping");
@@ -116,6 +126,7 @@ fn plugin_identity_and_state_round_trip_through_the_container() {
 
 #[test]
 fn a_project_with_a_vst3_instrument_renders_audio() {
+    let _guard = guard();
     let catalog = Catalog::scan();
     if catalog.get(DEXED).is_none() {
         eprintln!("Dexed is not installed; skipping");

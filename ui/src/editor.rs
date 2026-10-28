@@ -2225,7 +2225,14 @@ fn is_midi(clip: &Clip) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+
+    /// Plugin loading/processing/teardown is serialised in the app. Tests run
+    /// on several threads, so they take the same lock to keep plugin factories
+    /// from racing each other.
+    static PLUGIN_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[cfg(test)]
     fn test_editor() -> Editor {
@@ -2307,6 +2314,9 @@ mod tests {
 
     #[test]
     fn live_plugin_state_is_persisted_and_undoable() {
+        let _guard = PLUGIN_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         const DEXED: &str = "ABCDEF019182FAEB4447534244657864";
         let catalog = Catalog::scan();
         if catalog.get(DEXED).is_none() {
@@ -2369,6 +2379,9 @@ mod tests {
 
     #[test]
     fn adding_an_installed_instrument_creates_a_track_and_clip() {
+        let _guard = PLUGIN_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         const DEXED: &str = "ABCDEF019182FAEB4447534244657864";
         let catalog = Catalog::scan();
         if catalog.get(DEXED).is_none() {
@@ -2392,6 +2405,46 @@ mod tests {
             Some(format!("vst3:{DEXED}").as_str())
         );
         assert_eq!(project.nodes[&track].clips.len(), 1);
+    }
+
+    #[test]
+    fn two_installed_effects_stack_reorder_and_remove_through_the_ui_path() {
+        let _guard = PLUGIN_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let catalog = Catalog::scan();
+        let effects: Vec<odaw_vst3::PluginEntry> = catalog
+            .entries
+            .iter()
+            .filter(|entry| entry.is_effect())
+            .cloned()
+            .collect();
+        if effects.len() < 2 {
+            eprintln!("fewer than two VST3 effects are installed; skipping");
+            return;
+        }
+        let mut editor = test_editor();
+        editor.vst3 = Vst3Backend::new(catalog);
+        editor.select_track(NodeId::from_raw(1));
+        assert!(editor.add_plugin(&effects[0].class_id));
+        assert!(editor.add_plugin(&effects[1].class_id));
+
+        let track = NodeId::from_raw(1);
+        let rack = |editor: &Editor| {
+            editor.session.project().nodes[&track]
+                .rack
+                .iter()
+                .copied()
+                .collect::<Vec<_>>()
+        };
+        let after_add = rack(&editor);
+        assert_eq!(after_add.len(), 4);
+        assert!(editor.move_device(track, after_add[3], -1));
+        let reordered = rack(&editor);
+        assert_eq!(reordered[2], after_add[3]);
+        assert_eq!(reordered[3], after_add[2]);
+        assert!(editor.remove_device(track, reordered[2]));
+        assert_eq!(rack(&editor).len(), 3);
     }
 
     #[test]

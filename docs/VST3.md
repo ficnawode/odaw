@@ -125,11 +125,24 @@ The tests skip when the plugin is absent. They cover catalogue metadata, note
 processing, state capture/restore, and an offline project render through the
 normal compiler.
 
-Stacking is covered without needing an effect plugin:
+With Dragonfly Reverb (or any effect) installed:
+
+```sh
+cargo test -p odaw-vst3 --test effects
+```
+
+It processes an impulse through a real effect, restores its state and
+parameters, and renders a project with two stacked effects. Plugin tests take
+a process-local mutex because vendor factories and DPF plugins are not safe
+under concurrent instantiate/process/teardown. The app performs those
+operations on one control thread and one audio thread.
+
+Stacking is also covered without needing an effect plugin:
 
 ```sh
 cargo test -p odaw-compile effects_stack_in_rack_order
 cargo test -p odaw-ui rack_devices_can_be_reordered_and_removed
+cargo test -p odaw-ui two_installed_effects_stack_reorder_and_remove_through_the_ui_path
 cargo test -p odaw-ui live_plugin_state_is_persisted_and_undoable
 ```
 

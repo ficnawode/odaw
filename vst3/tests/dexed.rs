@@ -1,8 +1,21 @@
+use std::sync::Mutex;
+
 use odaw_core::{Node, NodeId, ParamAddress, ParamId, ParamValue};
 use odaw_engine::{Block, DeviceContext, DeviceFactory, NoteEvent, NoteEventKind, ParamBuffer};
 use odaw_vst3::{Catalog, Vst3Backend};
 
 const DEXED: &str = "ABCDEF019182FAEB4447534244657864";
+
+/// Vendor plugin factories are not reliable under concurrent instantiate /
+/// process / teardown. The app is single-threaded for plugin work and tests
+/// take this lock for the same reason.
+static PLUGIN_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn guard() -> std::sync::MutexGuard<'static, ()> {
+    PLUGIN_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn dexed_catalog() -> Option<Catalog> {
     let catalog = Catalog::scan();
@@ -12,6 +25,7 @@ fn dexed_catalog() -> Option<Catalog> {
 
 #[test]
 fn dexed_is_listed_with_metadata() {
+    let _guard = guard();
     let Some(catalog) = dexed_catalog() else {
         eprintln!("Dexed is not installed; skipping");
         return;
@@ -25,6 +39,7 @@ fn dexed_is_listed_with_metadata() {
 
 #[test]
 fn dexed_instrument_processes_a_note() {
+    let _guard = guard();
     let Some(catalog) = dexed_catalog() else {
         eprintln!("Dexed is not installed; skipping");
         return;
@@ -79,6 +94,7 @@ fn dexed_instrument_processes_a_note() {
 
 #[test]
 fn state_is_saved_and_restored() {
+    let _guard = guard();
     let Some(catalog) = dexed_catalog() else {
         eprintln!("Dexed is not installed; skipping");
         return;
