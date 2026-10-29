@@ -1,9 +1,9 @@
 use std::path::Path;
 
 use odaw_core::{
-    ChannelLayout, Clip, ClipContent, ClipId, Edge, EdgeId, LoopRegion, Marker, MarkerId, Node,
-    NodeId, NodeKind, NodePort, NodeRole, Note, NoteId, ParamId, ParamValue, Port, PortId, Project,
-    Tick,
+    AutomationLane, AutomationMode, ChannelLayout, Clip, ClipContent, ClipId, Curve, Edge, EdgeId,
+    Keyframe, LoopRegion, Marker, MarkerId, Node, NodeId, NodeKind, NodePort, NodeRole, Note,
+    NoteId, ParamId, ParamValue, Port, PortId, Project, Tick,
 };
 use odaw_engine::{DeviceContext, DeviceFactory};
 use odaw_format::Container;
@@ -14,6 +14,14 @@ const BARS: i64 = 16;
 const BEATS_PER_BAR: i64 = 4;
 const TOTAL_BEATS: i64 = BARS * BEATS_PER_BAR;
 const EIGHTH: i64 = odaw_core::PPQ / 2;
+
+const DEXED_CUTOFF: &str = "param.2029770765";
+const DEXED_RESONANCE: &str = "param.13936686";
+const DEXED_FEEDBACK: &str = "param.591125381";
+const DEXED_OP1_OUTPUT: &str = "param.501240629";
+const HALL_LATE_LEVEL: &str = "param.4";
+const HALL_SIZE: &str = "param.5";
+const PLATE_LATE_LEVEL: &str = "param.4";
 
 #[derive(Clone, Copy)]
 enum EffectChoice {
@@ -42,6 +50,14 @@ struct NoteSpec {
 }
 
 pub fn create(path: &Path, force: bool) -> Result<(), String> {
+    create_with(path, force, false)
+}
+
+pub fn create_automation(path: &Path, force: bool) -> Result<(), String> {
+    create_with(path, force, true)
+}
+
+fn create_with(path: &Path, force: bool, automation: bool) -> Result<(), String> {
     if path.exists() && !force {
         return Err(format!("{} already exists; pass --force", path.display()));
     }
@@ -59,8 +75,12 @@ pub fn create(path: &Path, force: bool) -> Result<(), String> {
         .ok_or_else(|| "Dragonfly Plate Reverb is not installed".to_owned())?;
     let backend = Vst3Backend::new(catalog);
 
-    let mut project = Project::empty("Ode to Joy — Dexed Layers", 48_000, 1)
-        .map_err(|error| error.to_string())?;
+    let title = if automation {
+        "Automation — Dexed Layers"
+    } else {
+        "Ode to Joy — Dexed Layers"
+    };
+    let mut project = Project::empty(title, 48_000, 1).map_err(|error| error.to_string())?;
     project.loops.push_back(LoopRegion {
         start: Tick::ZERO,
         end: Tick::from_raw(TOTAL_BEATS * odaw_core::PPQ),
@@ -200,20 +220,318 @@ pub fn create(path: &Path, force: bool) -> Result<(), String> {
     }
 
     project.track_order = track_order.into_iter().collect();
+    if automation {
+        add_automation(&mut project);
+    }
     Container::new(path)
         .save(&project)
         .map_err(|error| error.to_string())?;
     println!(
-        "created {} ({} tracks, {} beats at 120 BPM)",
+        "created {} ({} tracks, {} beats at 120 BPM{})",
         path.display(),
         project
             .nodes
             .values()
             .filter(|node| node.role == NodeRole::Track)
             .count(),
-        TOTAL_BEATS
+        TOTAL_BEATS,
+        if automation {
+            format!(", {} automation lanes", automation_lane_count(&project))
+        } else {
+            String::new()
+        }
     );
     Ok(())
+}
+
+fn automation_lane_count(project: &Project) -> usize {
+    project
+        .nodes
+        .values()
+        .map(|node| node.automation.len())
+        .sum()
+}
+
+fn add_automation(project: &mut Project) {
+    let bars = |bar: i64| Tick::from_raw((bar - 1) * BEATS_PER_BAR * odaw_core::PPQ);
+
+    if let Some(lead) = track_named(project, "Lead") {
+        if let Some(dexed) = rack_device(project, lead, DEXED) {
+            insert_lane(
+                project,
+                dexed,
+                DEXED_CUTOFF,
+                lane(
+                    [
+                        (bars(1), 0.34, Curve::Linear),
+                        (bars(4), 0.58, Curve::Linear),
+                        (bars(9), 0.84, Curve::Linear),
+                        (bars(13), 0.48, Curve::Linear),
+                        (bars(17), 0.62, Curve::Linear),
+                    ],
+                    AutomationMode::Absolute,
+                ),
+            );
+            insert_lane(
+                project,
+                dexed,
+                DEXED_RESONANCE,
+                lane(
+                    [
+                        (bars(1), 0.18, Curve::Linear),
+                        (bars(8), 0.44, Curve::Linear),
+                        (bars(16), 0.72, Curve::Linear),
+                    ],
+                    AutomationMode::Absolute,
+                ),
+            );
+            insert_lane(
+                project,
+                dexed,
+                DEXED_FEEDBACK,
+                lane(
+                    [
+                        (bars(1), 0.08, Curve::Hold),
+                        (bars(5), 0.08, Curve::Linear),
+                        (bars(9), 0.52, Curve::Hold),
+                        (bars(13), 0.52, Curve::Linear),
+                        (bars(17), 0.16, Curve::Linear),
+                    ],
+                    AutomationMode::Absolute,
+                ),
+            );
+        }
+        if let Some(hall) = rack_device(project, lead, "Hall") {
+            insert_lane(
+                project,
+                hall,
+                HALL_LATE_LEVEL,
+                lane(
+                    [
+                        (bars(1), 0.16, Curve::Linear),
+                        (bars(8), 0.22, Curve::Linear),
+                        (bars(12), 0.58, Curve::Linear),
+                        (bars(17), 0.30, Curve::Linear),
+                    ],
+                    AutomationMode::Absolute,
+                ),
+            );
+            insert_lane(
+                project,
+                hall,
+                HALL_SIZE,
+                lane(
+                    [
+                        (bars(1), 0.32, Curve::Linear),
+                        (bars(10), 0.86, Curve::Linear),
+                        (bars(17), 0.44, Curve::Linear),
+                    ],
+                    AutomationMode::Absolute,
+                ),
+            );
+        }
+        insert_lane(
+            project,
+            lead,
+            "pan",
+            lane(
+                [
+                    (bars(1), -0.38, Curve::Linear),
+                    (bars(5), 0.12, Curve::Linear),
+                    (bars(9), 0.46, Curve::Linear),
+                    (bars(13), -0.08, Curve::Linear),
+                    (bars(17), -0.38, Curve::Linear),
+                ],
+                AutomationMode::Absolute,
+            ),
+        );
+    }
+
+    if let Some(pad) = track_named(project, "Pad") {
+        if let Some(dexed) = rack_device(project, pad, DEXED) {
+            insert_lane(
+                project,
+                dexed,
+                DEXED_CUTOFF,
+                lane(
+                    [
+                        (bars(1), 0.16, Curve::Linear),
+                        (bars(9), 0.34, Curve::Linear),
+                        (bars(17), 0.72, Curve::Linear),
+                    ],
+                    AutomationMode::Absolute,
+                ),
+            );
+            insert_lane(
+                project,
+                dexed,
+                DEXED_RESONANCE,
+                lane(
+                    [
+                        (bars(1), 0.10, Curve::Linear),
+                        (bars(17), 0.38, Curve::Linear),
+                    ],
+                    AutomationMode::Absolute,
+                ),
+            );
+        }
+        if let Some(plate) = rack_device(project, pad, "Plate") {
+            insert_lane(
+                project,
+                plate,
+                PLATE_LATE_LEVEL,
+                lane(
+                    [
+                        (bars(1), 0.22, Curve::Linear),
+                        (bars(6), 0.34, Curve::Linear),
+                        (bars(12), 0.64, Curve::Linear),
+                        (bars(17), 0.40, Curve::Linear),
+                    ],
+                    AutomationMode::Absolute,
+                ),
+            );
+        }
+    }
+
+    if let Some(bass) = track_named(project, "Bass") {
+        if let Some(dexed) = rack_device(project, bass, DEXED) {
+            insert_lane(
+                project,
+                dexed,
+                DEXED_OP1_OUTPUT,
+                lane(
+                    [
+                        (bars(1), 0.58, Curve::Linear),
+                        (bars(8), 0.72, Curve::Linear),
+                        (bars(15), 0.90, Curve::Linear),
+                        (bars(17), 0.70, Curve::Linear),
+                    ],
+                    AutomationMode::Absolute,
+                ),
+            );
+        }
+        insert_lane(
+            project,
+            bass,
+            "gain_db",
+            lane(
+                [
+                    (bars(1), 4.0, Curve::Linear),
+                    (bars(9), 2.0, Curve::Linear),
+                    (bars(17), 5.0, Curve::Linear),
+                ],
+                AutomationMode::Absolute,
+            ),
+        );
+    }
+
+    if let Some(bell) = track_named(project, "Bass Bell") {
+        insert_lane(
+            project,
+            bell,
+            "pan",
+            lane(
+                [
+                    (bars(1), -0.55, Curve::Linear),
+                    (bars(5), 0.55, Curve::Linear),
+                    (bars(9), -0.55, Curve::Linear),
+                    (bars(13), 0.55, Curve::Linear),
+                    (bars(17), -0.35, Curve::Linear),
+                ],
+                AutomationMode::Absolute,
+            ),
+        );
+    }
+
+    if let Some(arp) = track_named(project, "Arp") {
+        insert_lane(
+            project,
+            arp,
+            "pan",
+            lane(
+                [
+                    (bars(1), -0.62, Curve::Linear),
+                    (bars(3), 0.62, Curve::Linear),
+                    (bars(5), -0.62, Curve::Linear),
+                    (bars(7), 0.62, Curve::Linear),
+                    (bars(9), -0.62, Curve::Linear),
+                    (bars(11), 0.62, Curve::Linear),
+                    (bars(13), -0.62, Curve::Linear),
+                    (bars(15), 0.62, Curve::Linear),
+                    (bars(17), 0.0, Curve::Linear),
+                ],
+                AutomationMode::Absolute,
+            ),
+        );
+    }
+
+    let master = project
+        .nodes
+        .iter()
+        .find(|(_, node)| node.role == NodeRole::Master)
+        .map(|(id, _)| *id);
+    if let Some(master) = master {
+        insert_lane(
+            project,
+            master,
+            "gain_db",
+            lane(
+                [
+                    (bars(1), 3.0, Curve::Linear),
+                    (bars(13), 3.0, Curve::Linear),
+                    (bars(17), -4.0, Curve::Linear),
+                ],
+                AutomationMode::Absolute,
+            ),
+        );
+    }
+}
+
+fn track_named(project: &Project, name: &str) -> Option<NodeId> {
+    project
+        .nodes
+        .iter()
+        .find(|(_, node)| node.role == NodeRole::Track && node.name.as_deref() == Some(name))
+        .map(|(id, _)| *id)
+}
+
+fn rack_device(project: &Project, track: NodeId, fragment: &str) -> Option<NodeId> {
+    let node = project.nodes.get(&track)?;
+    node.rack.iter().copied().find(|device| {
+        project.nodes.get(device).is_some_and(|node| {
+            node.kind
+                .as_ref()
+                .is_some_and(|kind| kind.as_str().contains(fragment))
+                || node
+                    .name
+                    .as_deref()
+                    .is_some_and(|name| name.contains(fragment))
+        })
+    })
+}
+
+fn insert_lane(project: &mut Project, node: NodeId, param: &str, lane: AutomationLane) {
+    if let Some(node) = project.nodes.get_mut(&node) {
+        node.automation.insert(ParamId::new(param), lane);
+    }
+}
+
+fn lane(
+    points: impl IntoIterator<Item = (Tick, f64, Curve)>,
+    mode: AutomationMode,
+) -> AutomationLane {
+    AutomationLane {
+        mode,
+        enabled: true,
+        keyframes: points
+            .into_iter()
+            .map(|(tick, value, curve)| Keyframe {
+                tick,
+                value: ParamValue::Float(value),
+                curve,
+            })
+            .collect(),
+    }
 }
 
 fn find_effect<'a>(catalog: &'a Catalog, fragment: &str) -> Option<&'a PluginEntry> {

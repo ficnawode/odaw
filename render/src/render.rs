@@ -60,7 +60,11 @@ pub fn render_project_with_compiler(
     let mut events = Vec::with_capacity(4096);
     let mut offset = 0usize;
     while offset < total {
-        let frames = (total - offset).min(block_size);
+        let mut frames = (total - offset).min(block_size);
+        frames = frames.min(engine.next_automation_boundary(offset as u64, frames));
+        if frames == 0 {
+            break;
+        }
         scheduler.events_for_block(offset as u64, frames, &mut events);
         let start = offset * channels;
         let end = start + frames * channels;
@@ -122,6 +126,22 @@ mod tests {
         }
     }
 
+    fn compare(left: &[f32], right: &[f32], label: &str) {
+        if left == right {
+            return;
+        }
+        let index = left
+            .iter()
+            .zip(right)
+            .position(|(left, right)| left != right)
+            .unwrap_or_else(|| left.len().min(right.len()));
+        panic!(
+            "{label}: first difference at sample {index}: {:?} vs {:?}",
+            left.get(index),
+            right.get(index)
+        );
+    }
+
     #[test]
     fn demo_renders_audio() {
         let audio = render_project(&demo::project(), options(64, 1_000)).unwrap();
@@ -177,6 +197,53 @@ mod tests {
         let third = render_project(&demo::project(), options(512, 1_500)).unwrap();
         assert_eq!(first.samples, second.samples);
         assert_eq!(second.samples, third.samples);
+    }
+
+    #[test]
+    fn gain_automation_renders_and_is_block_size_independent() {
+        use odaw_core::{
+            AutomationLane, AutomationMode, Curve, Keyframe, NodeId, PPQ, ParamId, ParamValue, Tick,
+        };
+
+        let mut project = demo::project();
+        let track = NodeId::from_raw(1);
+        project.nodes.get_mut(&track).unwrap().automation.insert(
+            ParamId::new("gain_db"),
+            AutomationLane {
+                mode: AutomationMode::Absolute,
+                enabled: true,
+                keyframes: [
+                    Keyframe {
+                        tick: Tick::ZERO,
+                        value: ParamValue::Float(0.0),
+                        curve: Curve::Linear,
+                    },
+                    Keyframe {
+                        tick: Tick::from_raw(PPQ),
+                        value: ParamValue::Float(-60.0),
+                        curve: Curve::Linear,
+                    },
+                ]
+                .into_iter()
+                .collect(),
+            },
+        );
+
+        let early = render_project(&project, options(32, 24_000)).unwrap();
+        let late = render_project(&project, options(64, 24_000)).unwrap();
+        let wide = render_project(&project, options(512, 24_000)).unwrap();
+        compare(&early.samples, &late.samples, "32 vs 64");
+        compare(&late.samples, &wide.samples, "64 vs 512");
+
+        let energy = |samples: &[f32], start: usize| -> f32 {
+            samples[start..start + 2_000]
+                .iter()
+                .map(|sample| sample.abs())
+                .sum()
+        };
+        let beginning = energy(&early.samples, 0);
+        let end = energy(&early.samples, 22_000);
+        assert!(beginning > end * 10.0);
     }
 
     #[test]

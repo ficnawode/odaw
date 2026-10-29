@@ -1,8 +1,8 @@
 use std::f64::consts::TAU;
 use std::sync::Arc;
 
-use odaw_core::{NodeId, ParamAddress, ParamId};
-use odaw_engine::{Block, DeviceProcessor, Meter, NoteEventKind};
+use odaw_core::{NodeId, ParamAddress, ParamId, ParamValue};
+use odaw_engine::{Block, DeviceParameter, DeviceProcessor, Meter, NoteEventKind};
 
 pub const SINE_KIND: &str = "builtin.sine";
 pub const POLY_KIND: &str = "builtin.poly";
@@ -33,6 +33,31 @@ impl Sine {
 }
 
 impl DeviceProcessor for Sine {
+    fn parameter_info(&self) -> Vec<DeviceParameter> {
+        vec![
+            DeviceParameter {
+                id: ParamId::new("frequency"),
+                label: "Frequency".to_owned(),
+                default: ParamValue::Float(440.0),
+                min: 0.0,
+                max: 20_000.0,
+                step_count: 0,
+                unit: "Hz".to_owned(),
+                read_only: false,
+            },
+            DeviceParameter {
+                id: ParamId::new("gain"),
+                label: "Gain".to_owned(),
+                default: ParamValue::Float(0.2),
+                min: 0.0,
+                max: 1.0,
+                step_count: 0,
+                unit: String::new(),
+                read_only: false,
+            },
+        ]
+    }
+
     fn process(&mut self, block: &mut Block<'_>) {
         let sample_rate = block.sample_rate as f64;
         let frequency = finite_or(block.params.float(&self.frequency, 440.0), 440.0)
@@ -66,6 +91,19 @@ impl Gain {
 }
 
 impl DeviceProcessor for Gain {
+    fn parameter_info(&self) -> Vec<DeviceParameter> {
+        vec![DeviceParameter {
+            id: ParamId::new("gain"),
+            label: "Gain".to_owned(),
+            default: ParamValue::Float(1.0),
+            min: 0.0,
+            max: 4.0,
+            step_count: 0,
+            unit: String::new(),
+            read_only: false,
+        }]
+    }
+
     fn process(&mut self, block: &mut Block<'_>) {
         let gain = finite_or(block.params.float(&self.gain, 1.0), 1.0) as f32;
         for (destination, input) in block.output.iter_mut().zip(block.input) {
@@ -108,33 +146,46 @@ impl ChannelStrip {
 
 impl DeviceProcessor for ChannelStrip {
     fn process(&mut self, block: &mut Block<'_>) {
-        let gain_db = finite_or(block.params.float(&self.gain, 0.0), 0.0).clamp(-96.0, 24.0);
-        let gain = 10f32.powf(gain_db as f32 / 20.0);
-        let pan = finite_or(block.params.float(&self.pan, 0.0), 0.0).clamp(-1.0, 1.0) as f32;
-        if pan == 0.0 {
-            for (destination, input) in block.output.iter_mut().zip(block.input) {
-                *destination = *input * gain;
-            }
+        let smooth =
+            block.params.ramp(&self.gain).is_some() || block.params.ramp(&self.pan).is_some();
+        if !smooth {
+            let gain_db = finite_or(block.params.float(&self.gain, 0.0), 0.0).clamp(-96.0, 24.0);
+            let gain = 10f32.powf(gain_db as f32 / 20.0);
+            let pan = finite_or(block.params.float(&self.pan, 0.0), 0.0).clamp(-1.0, 1.0) as f32;
+            apply_gain(block, gain, pan);
         } else {
-            let left = gain * (1.0 - pan).clamp(0.0, 1.0);
-            let right = gain * (1.0 + pan).clamp(0.0, 1.0);
-            match block.channels {
-                0 => {}
-                1 => {
-                    for (destination, input) in block.output.iter_mut().zip(block.input) {
-                        *destination = *input * gain;
+            let channels = block.channels;
+            for frame in 0..block.frames {
+                let gain_db = finite_or(
+                    block
+                        .params
+                        .float_at(&self.gain, frame, block.frames)
+                        .unwrap_or(0.0),
+                    0.0,
+                )
+                .clamp(-96.0, 24.0);
+                let gain = 10f32.powf(gain_db as f32 / 20.0);
+                let pan = finite_or(
+                    block
+                        .params
+                        .float_at(&self.pan, frame, block.frames)
+                        .unwrap_or(0.0),
+                    0.0,
+                )
+                .clamp(-1.0, 1.0) as f32;
+                let start = frame * channels;
+                match channels {
+                    0 => {}
+                    1 => {
+                        block.output[start] = block.input[start] * gain;
                     }
-                }
-                _ => {
-                    for (input, output) in block
-                        .input
-                        .chunks_exact(block.channels)
-                        .zip(block.output.chunks_exact_mut(block.channels))
-                    {
-                        output[0] = input[0] * left;
-                        output[1] = input[1] * right;
-                        for channel in 2..block.channels {
-                            output[channel] = input[channel] * gain;
+                    _ => {
+                        let left = gain * (1.0 - pan).clamp(0.0, 1.0);
+                        let right = gain * (1.0 + pan).clamp(0.0, 1.0);
+                        block.output[start] = block.input[start] * left;
+                        block.output[start + 1] = block.input[start + 1] * right;
+                        for channel in 2..channels {
+                            block.output[start + channel] = block.input[start + channel] * gain;
                         }
                     }
                 }
@@ -143,6 +194,38 @@ impl DeviceProcessor for ChannelStrip {
 
         if let Some(meter) = &self.meter {
             meter.store_block(block.output, block.channels);
+        }
+    }
+}
+
+fn apply_gain(block: &mut Block<'_>, gain: f32, pan: f32) {
+    if pan == 0.0 {
+        for (destination, input) in block.output.iter_mut().zip(block.input) {
+            *destination = *input * gain;
+        }
+        return;
+    }
+    let left = gain * (1.0 - pan).clamp(0.0, 1.0);
+    let right = gain * (1.0 + pan).clamp(0.0, 1.0);
+    match block.channels {
+        0 => {}
+        1 => {
+            for (destination, input) in block.output.iter_mut().zip(block.input) {
+                *destination = *input * gain;
+            }
+        }
+        _ => {
+            for (input, output) in block
+                .input
+                .chunks_exact(block.channels)
+                .zip(block.output.chunks_exact_mut(block.channels))
+            {
+                output[0] = input[0] * left;
+                output[1] = input[1] * right;
+                for channel in 2..block.channels {
+                    output[channel] = input[channel] * gain;
+                }
+            }
         }
     }
 }
@@ -308,6 +391,19 @@ impl PolySine {
 }
 
 impl DeviceProcessor for PolySine {
+    fn parameter_info(&self) -> Vec<DeviceParameter> {
+        vec![DeviceParameter {
+            id: ParamId::new("gain"),
+            label: "Gain".to_owned(),
+            default: ParamValue::Float(0.25),
+            min: 0.0,
+            max: 1.0,
+            step_count: 0,
+            unit: String::new(),
+            read_only: false,
+        }]
+    }
+
     fn process(&mut self, block: &mut Block<'_>) {
         let instrument_gain = finite_or(block.params.float(&self.gain, 0.25), 0.0);
         let channels = block.channels;

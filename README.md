@@ -54,13 +54,17 @@ What works today:
   peaks, and duration.
 - `odaw-platform`: `cpal` output with f32/i16/u16 conversion.
 - `odaw-format`: versioned DTOs, postcard payloads, JSON manifests, and
-  v1/v2/v3 → v4 migration. Track names, colors, mute, solo, display order, and
-  plugin state are persisted.
+  v1–v4 → v5 migration. Track names, colors, mute, solo, display order,
+  plugin state, and automation lanes are persisted.
 - `odaw-ui` / `odaw-app`: Ableton-like timeline with track headers, colors,
   names, mute/solo, per-track gain/pan faders with live stereo level meters, and
   a single stereo master out strip in the timeline. Clips move/resize/split/
   duplicate and support marquee multi-selection, grid zoom, and snapping. The
-  collapsible/resizable piano roll adds a note on a tap, marquee-selects on a
+  collapsible/resizable bottom panel has Notes, Automation, and Clip/Track tabs.
+  Automation lanes can be created from any mixer or plugin parameter control,
+  edited with points and Hold/Linear segments, switched between Absolute and
+  Trim, enabled/disabled, recorded from touch gestures, and shown as expandable
+  rows under a track. The piano roll adds a note on a tap, marquee-selects on a
   drag, and edits note groups with move, transpose, copy/paste, and duplicate.
   It also has note resize, right-click menus, snap, trackpad zoom, undo, and
   redo. Snap follows the horizontal zoom from 1/1 down to 1/128 in both the
@@ -82,7 +86,9 @@ What works today:
   clips, devices) in both cases. Edits go through `Session`; structural edits
   are recompiled and published to the realtime engine, while fader gestures
   update the live parameter buffer and commit one value-only command on
-  release. A plugin browser scans VST3 bundles in the background; an instrument
+  release. Automation edits compile only a new automation plan and swap it into
+  the live engine; they never rebuild the graph. A plugin browser scans VST3
+  bundles in the background; an instrument
   is added as a new track and an effect is appended to the selected track's
   rack. The device list is the serial signal chain: effects can be reordered or
   removed, and each VST3 device exposes a generic normalized parameter panel, a
@@ -98,7 +104,9 @@ Current limits: mono/stereo only, devices must live in a rack, the output
 device must support the project sample rate directly, audio clips are not
 time-stretched when the tempo changes, MIDI notes are not recorded from
 hardware, track grouping is not implemented, there is no file dialog, no
-velocity lane, no loop transport, and no parameter automation editing. Note
+velocity lane, and no loop transport. Automation supports Hold and Linear
+segments and touch recording; curve shapes, write/latch modes, and
+sample-accurate VST3 parameter changes are still future work. Note
 group copy/paste stays within the selected MIDI clip. VST3 support is
 first-pass: one main audio input/output bus, block-accurate parameters, no
 instance retention across structural edits (state is captured and restored),
@@ -126,7 +134,11 @@ cargo run -p odaw-cli -- demo demo.odaw
 cargo run -p odaw-cli -- render demo.odaw -o demo.wav --duration 2
 cargo run -p odaw-cli -- play demo.odaw
 cargo run -p odaw-app -- demo.odaw
+cargo run -p odaw-cli -- demo-automation automation.odaw
+cargo run -p odaw-cli -- render automation.odaw -o automation.wav
 cargo run -p odaw-cli -- validate song.odaw
+cargo run -p odaw-cli -- automation list song.odaw
+cargo run -p odaw-cli -- automation set song.odaw --node 1 --param gain_db --tick 0 --value -6
 cargo run -p odaw-cli -- plugins --refresh
 cargo run -p odaw-cli -- plugins --json
 cargo run -p odaw-cli -- demo-dexed examples/ode-to-joy.odaw
@@ -137,6 +149,11 @@ cargo run -p odaw-cli -- render examples/ode-to-joy.odaw -o ode.wav
 lead, diatonic harmony, syncopated bass, offbeat bass bell, pad, and arpeggio,
 with Hall reverb on the lead and Plate reverb on the pad. `demo-dexed`
 regenerates it from the installed plugin catalogue.
+
+`examples/automation-demo.odaw` is the same arrangement with 14 automation
+lanes: Dexed cutoff, resonance, feedback, and operator output; Dragonfly Hall
+and Plate reverb level and size; lead, bell, and arp pan; bass gain; and a
+master fade-out. `demo-automation` regenerates it from the installed plugins.
 
 A container is a directory:
 
@@ -179,3 +196,5 @@ added when their phase starts, so the tree never carries empty placeholders.
 - [.opencode/CODING_GUIDELINES.md](.opencode/CODING_GUIDELINES.md) — how code
   is written.
 - [docs/VST3.md](docs/VST3.md) — VST3 backend boundaries, mapping, and limits.
+- [docs/AUTOMATION.md](docs/AUTOMATION.md) — automation semantics, render plan,
+  and editor proposal.

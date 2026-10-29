@@ -70,20 +70,38 @@ impl MixerState {
             node,
             param: ParamId::new(param),
         };
+        let lane_value = if editor.playing && !editor.automation_armed(&address) {
+            editor
+                .automation_value(&address, editor.playhead_tick())
+                .map(|value| value.as_f64())
+        } else {
+            None
+        };
         let mut value = self
             .previews
             .get(&address)
             .copied()
+            .or(lane_value)
             .or_else(|| editor.param_value(node, param))
             .unwrap_or(default);
 
+        let has_lane = editor.automation_lane(node, &ParamId::new(param)).is_some();
+        let label = if has_lane {
+            format!("{label}  A")
+        } else {
+            label.to_owned()
+        };
         let is_gain = param == GAIN_DB;
         let response = if compact {
             let short = if param == PAN { "P" } else { "G" };
             ui.label(
-                egui::RichText::new(short)
-                    .size(9.0)
-                    .color(Color32::from_rgb(145, 151, 164)),
+                egui::RichText::new(if has_lane {
+                    format!("{short}A")
+                } else {
+                    short.to_owned()
+                })
+                .size(9.0)
+                .color(Color32::from_rgb(145, 151, 164)),
             );
             let width = if is_gain { 52.0 } else { 36.0 };
             let slider = ui.add_sized(
@@ -109,21 +127,21 @@ impl MixerState {
             ui.add_sized(
                 vec2(slider_width, METER_HEIGHT),
                 egui::Slider::new(&mut value, range)
-                    .text(label)
+                    .text(&label)
                     .suffix(suffix)
                     .custom_formatter(|value, _| format!("{value:.1}")),
             )
         } else {
             ui.add(
                 egui::Slider::new(&mut value, range)
-                    .text(label)
+                    .text(&label)
                     .custom_formatter(|value, _| pan_label(value)),
             )
         };
 
         let response = if compact {
             response
-                .on_hover_text(label)
+                .on_hover_text(&label)
                 .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
         } else {
             response
@@ -138,6 +156,27 @@ impl MixerState {
         {
             editor.commit_param(node, param, value);
         }
+
+        let menu_address = address.clone();
+        response.context_menu(|ui| {
+            if ui.button("Show automation").clicked() {
+                editor.request_automation(menu_address.clone());
+                ui.close();
+            }
+            if editor
+                .automation_lane(menu_address.node, &menu_address.param)
+                .is_none()
+            {
+                if ui.button("Add automation lane").clicked() {
+                    editor.add_automation_lane(&menu_address);
+                    editor.request_automation(menu_address.clone());
+                    ui.close();
+                }
+            } else if ui.button("Clear automation").clicked() {
+                editor.set_automation(menu_address.node, menu_address.param.clone(), None);
+                ui.close();
+            }
+        });
     }
 
     pub fn meter(&mut self, ui: &mut egui::Ui, editor: &Editor, node: NodeId) {

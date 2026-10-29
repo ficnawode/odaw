@@ -1,7 +1,11 @@
 use std::fmt;
 
-use odaw_core::{NodeId, ParamId, ParamValue};
+use std::collections::BTreeMap;
 
+use odaw_core::{NodeId, ParamAddress, ParamId, ParamValue};
+
+use crate::automation::AutomationPlan;
+use crate::device::DeviceParameter;
 use crate::meter::MeterBank;
 use crate::param::ParamBuffer;
 
@@ -29,6 +33,8 @@ pub struct CompiledProject {
     pub plan: RenderPlan,
     pub params: ParamBuffer,
     pub meters: MeterBank,
+    pub automation: AutomationPlan,
+    pub parameters: BTreeMap<ParamAddress, DeviceParameter>,
 }
 
 pub trait DeviceProcessor: fmt::Debug + Send {
@@ -39,6 +45,12 @@ pub trait DeviceProcessor: fmt::Debug + Send {
     /// Parameters this device wants present in the parameter buffer, including
     /// their initial values. Document values are inserted first and win.
     fn parameter_defaults(&self) -> Vec<(ParamId, ParamValue)> {
+        Vec::new()
+    }
+
+    /// Parameters a UI can expose for editing and automation. Values in
+    /// `parameter_defaults` only need slots; this carries ranges and labels.
+    fn parameter_info(&self) -> Vec<DeviceParameter> {
         Vec::new()
     }
 

@@ -59,6 +59,13 @@ impl Container {
                     project: project.into(),
                 }
             }
+            4 => {
+                let project: crate::v4::ProjectDtoV4 = postcard::from_bytes(rest)?;
+                ProjectFile {
+                    format_version: FORMAT_VERSION,
+                    project: project.into(),
+                }
+            }
             FORMAT_VERSION => {
                 let project: crate::dto::ProjectDto = postcard::from_bytes(rest)?;
                 ProjectFile {
@@ -430,6 +437,7 @@ mod tests {
             ParamId::new("gain"),
             AutomationLane {
                 mode: AutomationMode::Trim,
+                enabled: true,
                 keyframes: [
                     Keyframe {
                         tick: Tick::ZERO,

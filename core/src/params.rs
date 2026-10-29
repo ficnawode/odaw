@@ -41,6 +41,44 @@ pub enum ParamValue {
     Enum(u32),
 }
 
+impl ParamValue {
+    pub fn as_f64(self) -> f64 {
+        match self {
+            Self::Float(value) => value,
+            Self::Int(value) => value as f64,
+            Self::Bool(value) => f64::from(u8::from(value)),
+            Self::Enum(value) => f64::from(value),
+        }
+    }
+
+    pub fn is_continuous(self) -> bool {
+        matches!(self, Self::Float(_) | Self::Int(_))
+    }
+
+    /// Interpolate toward `next`. Bool and enum values hold; mixed variants
+    /// hold the left value instead of inventing a conversion.
+    pub fn interpolate(self, next: Self, ratio: f64) -> Self {
+        let ratio = ratio.clamp(0.0, 1.0);
+        match (self, next) {
+            (Self::Float(left), Self::Float(right)) => Self::Float(left + (right - left) * ratio),
+            (Self::Int(left), Self::Int(right)) => {
+                let value = left as f64 + (right - left) as f64 * ratio;
+                Self::Int(value.round() as i64)
+            }
+            _ => self,
+        }
+    }
+
+    /// Add a trim offset. Bool and enum lanes never use trim.
+    pub fn offset(self, offset: Self) -> Self {
+        match (self, offset) {
+            (Self::Float(value), Self::Float(delta)) => Self::Float(value + delta),
+            (Self::Int(value), Self::Int(delta)) => Self::Int(value.saturating_add(delta)),
+            _ => self,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParamKind {
     Control,

@@ -676,6 +676,38 @@ impl DeviceProcessor for Vst3Processor {
         defaults
     }
 
+    fn parameter_info(&self) -> Vec<DeviceParameter> {
+        let Ok(plugin) = self.plugin.lock() else {
+            return Vec::new();
+        };
+        let mut parameters: Vec<DeviceParameter> = plugin
+            .get_parameters()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|parameter| DeviceParameter {
+                id: ParamId::new(format!("{PARAM_PREFIX}{}", parameter.id)),
+                label: parameter.name,
+                default: ParamValue::Float(parameter.default.clamp(0.0, 1.0)),
+                min: 0.0,
+                max: 1.0,
+                step_count: u32::try_from(parameter.step_count).unwrap_or(u32::MAX),
+                unit: parameter.unit,
+                read_only: parameter.is_read_only,
+            })
+            .collect();
+        parameters.push(DeviceParameter {
+            id: ParamId::new(BYPASS_PARAM),
+            label: "Bypass".to_owned(),
+            default: ParamValue::Float(0.0),
+            min: 0.0,
+            max: 1.0,
+            step_count: 1,
+            unit: String::new(),
+            read_only: false,
+        });
+        parameters
+    }
+
     fn process(&mut self, block: &mut Block<'_>) {
         self.bind_node(block.node);
         let frames = block.frames;

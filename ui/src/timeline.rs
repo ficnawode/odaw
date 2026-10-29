@@ -4,13 +4,18 @@ use std::sync::Arc;
 use eframe::egui::{
     self, Align, Align2, Color32, FontId, Layout, Pos2, Rect, Sense, Stroke, pos2, vec2,
 };
-use odaw_core::{Clip, ClipContent, ClipId, Frames, Node, NodeId, NodeRole, PPQ, Project, Tick};
+use odaw_core::{
+    AutomationLane, AutomationMode, Clip, ClipContent, ClipId, Curve, Frames, Node, NodeId,
+    NodeRole, PPQ, ParamAddress, ParamId, Project, Tick,
+};
+use odaw_engine::DeviceParameter;
 
 use crate::editor::{Editor, TRACK_COLORS};
 use crate::mixer::MixerState;
 use crate::piano_roll::SnapSettings;
 
 const ROW_HEIGHT: f32 = 58.0;
+const LANE_HEIGHT: f32 = 34.0;
 const HEADER_MIN_WIDTH: f32 = 240.0;
 const HEADER_DEFAULT_WIDTH: f32 = 285.0;
 const HEADER_MAX_WIDTH: f32 = 520.0;
@@ -24,6 +29,25 @@ struct TrackRow {
     name: String,
     color: Color32,
     clips: Vec<ClipRow>,
+    lanes: Vec<LaneRow>,
+}
+
+#[derive(Clone, Debug)]
+struct LaneRow {
+    node: NodeId,
+    param: ParamId,
+    label: String,
+    lane: AutomationLane,
+}
+
+impl TrackRow {
+    fn height(&self, state: &TimelineState) -> f32 {
+        if state.automation_expanded.contains(&self.id) {
+            ROW_HEIGHT + self.lanes.len() as f32 * LANE_HEIGHT
+        } else {
+            ROW_HEIGHT
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -85,6 +109,8 @@ pub struct TimelineState {
     context_tick: Option<Tick>,
     pub hover_target: Option<(NodeId, Tick)>,
     pub rename_request: Option<NodeId>,
+    pub automation_expanded: BTreeSet<NodeId>,
+    pub automation_focus: Option<ParamAddress>,
 }
 
 impl Default for TimelineState {
@@ -100,6 +126,8 @@ impl Default for TimelineState {
             context_tick: None,
             hover_target: None,
             rename_request: None,
+            automation_expanded: BTreeSet::new(),
+            automation_focus: None,
         }
     }
 }
@@ -189,8 +217,10 @@ pub fn show(
         state.snap.update_zoom(state.pixels_per_beat);
     }
     let content_width = (total_beats as f32 * state.pixels_per_beat).max(viewport_width);
-    let row_count = tracks.len() + usize::from(master.is_some());
-    let grid_height = RULER_HEIGHT + row_count.max(1) as f32 * ROW_HEIGHT;
+    let track_heights: Vec<f32> = tracks.iter().map(|track| track.height(state)).collect();
+    let tracks_height: f32 = track_heights.iter().sum();
+    let grid_height =
+        RULER_HEIGHT + tracks_height + if master.is_some() { ROW_HEIGHT } else { 0.0 };
 
     egui::ScrollArea::vertical()
         .id_salt("timeline_vertical")
@@ -217,6 +247,11 @@ pub fn show(
                             selected_track == Some(track.id),
                             state,
                         );
+                        if state.automation_expanded.contains(&track.id) {
+                            for lane in &track.lanes {
+                                lane_header(ui, editor, track, lane, state);
+                            }
+                        }
                     }
                     if let Some(master) = master {
                         master_header(ui, editor, mixer, master, state.header_width);
@@ -256,7 +291,7 @@ pub fn show(
                             state.snap,
                             total_beats,
                             beats_per_bar,
-                            tracks.len(),
+                            &track_heights,
                             master.is_some(),
                         );
 
@@ -277,8 +312,9 @@ pub fn show(
                                     .iter()
                                     .position(|row| row.id == draw_track)
                                     .unwrap_or(index);
-                                let draw_y =
-                                    origin.y + RULER_HEIGHT + draw_index as f32 * ROW_HEIGHT;
+                                let draw_y = origin.y
+                                    + RULER_HEIGHT
+                                    + track_heights[..draw_index].iter().sum::<f32>();
                                 let rect = clip_rect(draw, origin, draw_y, state.pixels_per_beat);
                                 let selected = selected_clips.contains(&clip.id);
                                 let hovered =
@@ -306,8 +342,37 @@ pub fn show(
                             }
                         }
 
+                        let playhead = editor.playhead_tick();
+                        for (index, track) in tracks.iter().enumerate() {
+                            if !state.automation_expanded.contains(&track.id) {
+                                continue;
+                            }
+                            let mut lane_y = origin.y
+                                + RULER_HEIGHT
+                                + track_heights[..index].iter().sum::<f32>()
+                                + ROW_HEIGHT;
+                            for lane in &track.lanes {
+                                let info = editor.parameter_info(&ParamAddress {
+                                    node: lane.node,
+                                    param: lane.param.clone(),
+                                });
+                                draw_lane_strip(
+                                    &painter,
+                                    origin,
+                                    content_width,
+                                    lane_y,
+                                    lane,
+                                    track.color,
+                                    info,
+                                    playhead,
+                                    state.pixels_per_beat,
+                                );
+                                lane_y += LANE_HEIGHT;
+                            }
+                        }
+
                         if let Some(position) = pointer {
-                            let track = track_at_y(position.y, origin, &tracks);
+                            let track = track_at_y(position.y, origin, &tracks, &track_heights);
                             let tick = if position.x >= origin.x {
                                 Some(tick_at(
                                     position.x,
@@ -342,7 +407,9 @@ pub fn show(
                         if ui.input(|input| input.pointer.primary_pressed()) && response.hovered() {
                             if let Some(position) = pointer {
                                 let ruler = position.y < origin.y + RULER_HEIGHT;
-                                let track_lane = track_at_y(position.y, origin, &tracks).is_some();
+                                let track_lane =
+                                    track_at_y(position.y, origin, &tracks, &track_heights)
+                                        .is_some();
                                 let hit = hits
                                     .iter()
                                     .find(|(rect, _, _, _)| rect.contains(position))
@@ -359,6 +426,17 @@ pub fn show(
                                         state.snap,
                                     );
                                     editor.preview_cursor(tick);
+                                } else if let Some(address) =
+                                    lane_at_y(position, origin, &tracks, &track_heights, state)
+                                {
+                                    state.automation_focus = Some(address);
+                                    let tick = tick_at(
+                                        position.x,
+                                        origin,
+                                        state.pixels_per_beat,
+                                        state.snap,
+                                    );
+                                    editor.set_cursor(tick);
                                 } else if let Some((rect, track, clip, value)) = hit {
                                     if shift {
                                         editor.toggle_clip(track, clip);
@@ -426,8 +504,9 @@ pub fn show(
                                         * PPQ as f32)
                                         .round()
                                         as i64;
-                                    let target_track = track_at_y(position.y, origin, &tracks)
-                                        .unwrap_or(drag.primary_track);
+                                    let target_track =
+                                        track_at_y(position.y, origin, &tracks, &track_heights)
+                                            .unwrap_or(drag.primary_track);
                                     let target_index = tracks
                                         .iter()
                                         .position(|row| row.id == target_track)
@@ -612,7 +691,9 @@ pub fn show(
                         if ui.input(|input| !input.raw.hovered_files.is_empty()) {
                             if let Some((track, tick)) = state.hover_target {
                                 if let Some(index) = tracks.iter().position(|row| row.id == track) {
-                                    let y = origin.y + RULER_HEIGHT + index as f32 * ROW_HEIGHT;
+                                    let y = origin.y
+                                        + RULER_HEIGHT
+                                        + track_heights[..index].iter().sum::<f32>();
                                     let x = origin.x
                                         + tick.raw() as f32 / PPQ as f32 * state.pixels_per_beat;
                                     painter.line_segment(
@@ -816,6 +897,32 @@ fn track_header(
                     let soloed = track_soloed(track, editor);
                     editor.set_track_soloed(track.id, !soloed);
                 }
+                let expanded = state.automation_expanded.contains(&track.id);
+                let automation = ui
+                    .add_enabled(
+                        !track.lanes.is_empty(),
+                        egui::Button::new(egui::RichText::new("A").color(if expanded {
+                            Color32::from_rgb(24, 26, 30)
+                        } else {
+                            Color32::from_rgb(230, 236, 245)
+                        }))
+                        .min_size(vec2(18.0, 18.0))
+                        .fill(if expanded {
+                            Color32::from_rgb(90, 170, 255)
+                        } else if track.lanes.is_empty() {
+                            Color32::from_rgb(52, 56, 64)
+                        } else {
+                            Color32::from_rgb(58, 96, 146)
+                        }),
+                    )
+                    .on_hover_text(if track.lanes.is_empty() {
+                        "No automation lanes on this track"
+                    } else {
+                        "Show automation lanes"
+                    });
+                if automation.clicked() && !state.automation_expanded.remove(&track.id) {
+                    state.automation_expanded.insert(track.id);
+                }
             });
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
@@ -858,6 +965,142 @@ fn master_header(
     );
 }
 
+fn lane_header(
+    ui: &mut egui::Ui,
+    editor: &mut Editor,
+    track: &TrackRow,
+    lane: &LaneRow,
+    state: &mut TimelineState,
+) {
+    let address = ParamAddress {
+        node: lane.node,
+        param: lane.param.clone(),
+    };
+    header_row(
+        ui,
+        state.header_width,
+        LANE_HEIGHT,
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            ui.add_space(8.0);
+            ui.colored_label(track.color.gamma_multiply(0.8), "▬");
+            let label = lane.label.clone();
+            if ui
+                .selectable_label(false, label)
+                .on_hover_text("Open this lane in the automation editor")
+                .clicked()
+            {
+                state.automation_focus = Some(address.clone());
+            }
+            ui.small(match lane.lane.mode {
+                AutomationMode::Absolute => "abs",
+                AutomationMode::Trim => "trim",
+            });
+            let mut enabled = lane.lane.enabled;
+            if ui
+                .add(egui::Checkbox::without_text(&mut enabled))
+                .on_hover_text("Enable or disable this lane")
+                .changed()
+            {
+                let mut updated = lane.lane.clone();
+                updated.enabled = enabled;
+                editor.set_automation(lane.node, lane.param.clone(), Some(updated));
+            }
+            if ui
+                .small_button("×")
+                .on_hover_text("Delete this automation lane")
+                .clicked()
+            {
+                editor.set_automation(lane.node, lane.param.clone(), None);
+            }
+        },
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_lane_strip(
+    painter: &egui::Painter,
+    origin: Pos2,
+    width: f32,
+    y: f32,
+    lane: &LaneRow,
+    color: Color32,
+    info: Option<&DeviceParameter>,
+    playhead: Tick,
+    pixels_per_beat: f32,
+) {
+    let rect = Rect::from_min_size(pos2(origin.x, y), vec2(width, LANE_HEIGHT));
+    painter.rect_filled(rect, 0.0, Color32::from_rgb(20, 22, 27));
+    painter.line_segment(
+        [rect.left_bottom(), rect.right_bottom()],
+        Stroke::new(0.5_f32, Color32::from_rgb(36, 40, 47)),
+    );
+    let (min, max) = lane_range(&lane.lane, info);
+    let alpha = if lane.lane.enabled { 220 } else { 100 };
+    let [red, green, blue, _] = color.to_array();
+    let line = Color32::from_rgba_unmultiplied(red, green, blue, alpha);
+    let points: Vec<_> = lane.lane.keyframes.iter().cloned().collect();
+    for pair in points.windows(2) {
+        let left = lane_point(pair[0].clone(), rect, pixels_per_beat, min, max);
+        let right = lane_point(pair[1].clone(), rect, pixels_per_beat, min, max);
+        match pair[0].curve {
+            Curve::Hold => {
+                painter.line_segment([left, pos2(right.x, left.y)], Stroke::new(1.5_f32, line));
+                painter.line_segment([pos2(right.x, left.y), right], Stroke::new(1.5_f32, line));
+            }
+            Curve::Linear => {
+                painter.line_segment([left, right], Stroke::new(1.5_f32, line));
+            }
+        }
+    }
+    for point in &points {
+        let position = lane_point(point.clone(), rect, pixels_per_beat, min, max);
+        painter.circle_filled(position, 2.6, line);
+    }
+    let x = origin.x + playhead.raw().max(0) as f32 / PPQ as f32 * pixels_per_beat;
+    if x >= rect.min.x && x <= rect.max.x {
+        painter.line_segment(
+            [pos2(x, rect.min.y), pos2(x, rect.max.y)],
+            Stroke::new(1.0_f32, Color32::from_rgb(244, 92, 92)),
+        );
+    }
+}
+
+fn lane_range(lane: &AutomationLane, info: Option<&DeviceParameter>) -> (f64, f64) {
+    if let Some(parameter) = info {
+        if parameter.max > parameter.min {
+            return (parameter.min, parameter.max);
+        }
+    }
+    let mut min: f64 = 0.0;
+    let mut max: f64 = 1.0;
+    for point in &lane.keyframes {
+        let value = point.value.as_f64();
+        min = min.min(value);
+        max = max.max(value);
+    }
+    if max <= min {
+        max = min + 1.0;
+    }
+    (min, max)
+}
+
+fn lane_point(
+    point: odaw_core::Keyframe,
+    rect: Rect,
+    pixels_per_beat: f32,
+    min: f64,
+    max: f64,
+) -> Pos2 {
+    let x = rect.min.x + point.tick.raw().max(0) as f32 / PPQ as f32 * pixels_per_beat;
+    let ratio = if max <= min {
+        0.0
+    } else {
+        ((point.value.as_f64() - min) / (max - min)).clamp(0.0, 1.0)
+    };
+    pos2(x, rect.max.y - 3.0 - rect.height() * 0.82 * ratio as f32)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_grid(
     painter: &egui::Painter,
@@ -868,7 +1111,7 @@ fn draw_grid(
     snap: SnapSettings,
     total_beats: i64,
     beats_per_bar: i64,
-    track_rows: usize,
+    track_heights: &[f32],
     has_master: bool,
 ) {
     painter.rect_filled(
@@ -883,7 +1126,7 @@ fn draw_grid(
     );
 
     if has_master {
-        let y = origin.y + RULER_HEIGHT + track_rows as f32 * ROW_HEIGHT;
+        let y = origin.y + RULER_HEIGHT + track_heights.iter().sum::<f32>();
         painter.rect_filled(
             Rect::from_min_size(pos2(origin.x, y), vec2(width, ROW_HEIGHT)),
             0.0,
@@ -896,6 +1139,17 @@ fn draw_grid(
             FontId::monospace(8.0),
             Color32::from_rgb(92, 98, 110),
         );
+    }
+    let mut row_y = origin.y + RULER_HEIGHT;
+    for (index, row_height) in track_heights.iter().enumerate() {
+        if index % 2 == 1 {
+            painter.rect_filled(
+                Rect::from_min_size(pos2(origin.x, row_y), vec2(width, *row_height)),
+                0.0,
+                Color32::from_rgb(25, 27, 32),
+            );
+        }
+        row_y += *row_height;
     }
 
     let bar_ticks = beats_per_bar.max(1) * PPQ;
@@ -1117,6 +1371,36 @@ fn track_rows(project: &Project, editor: &Editor) -> Vec<TrackRow> {
                         })
                     })
                     .collect(),
+                lanes: {
+                    let mut lanes: Vec<LaneRow> = node
+                        .automation
+                        .iter()
+                        .map(|(param, lane)| LaneRow {
+                            node: id,
+                            param: param.clone(),
+                            label: param.to_string(),
+                            lane: lane.clone(),
+                        })
+                        .collect();
+                    for device in &node.rack {
+                        let Some(device_node) = project.nodes.get(device) else {
+                            continue;
+                        };
+                        let device_name = device_node
+                            .name
+                            .clone()
+                            .unwrap_or_else(|| format!("Device {}", device.raw()));
+                        for (param, lane) in &device_node.automation {
+                            lanes.push(LaneRow {
+                                node: *device,
+                                param: param.clone(),
+                                label: format!("{device_name} / {param}"),
+                                lane: lane.clone(),
+                            });
+                        }
+                    }
+                    lanes
+                },
             })
         })
         .collect()
@@ -1163,12 +1447,39 @@ fn track_soloed(track: &TrackRow, editor: &Editor) -> bool {
         .is_some_and(|node| node.soloed)
 }
 
-fn track_at_y(y: f32, origin: Pos2, tracks: &[TrackRow]) -> Option<NodeId> {
-    let row = ((y - origin.y - RULER_HEIGHT) / ROW_HEIGHT).floor() as isize;
-    if row < 0 {
-        return None;
+fn track_at_y(y: f32, origin: Pos2, tracks: &[TrackRow], track_heights: &[f32]) -> Option<NodeId> {
+    let mut top = origin.y + RULER_HEIGHT;
+    for (track, height) in tracks.iter().zip(track_heights) {
+        if y >= top && y < top + height {
+            return Some(track.id);
+        }
+        top += height;
     }
-    tracks.get(row as usize).map(|track| track.id)
+    None
+}
+
+fn lane_at_y(
+    position: Pos2,
+    origin: Pos2,
+    tracks: &[TrackRow],
+    track_heights: &[f32],
+    state: &TimelineState,
+) -> Option<ParamAddress> {
+    let mut top = origin.y + RULER_HEIGHT;
+    for (track, height) in tracks.iter().zip(track_heights) {
+        if state.automation_expanded.contains(&track.id) {
+            let lanes_top = top + ROW_HEIGHT;
+            if position.y >= lanes_top && position.y < top + height {
+                let index = ((position.y - lanes_top) / LANE_HEIGHT).floor() as usize;
+                return track.lanes.get(index).map(|lane| ParamAddress {
+                    node: lane.node,
+                    param: lane.param.clone(),
+                });
+            }
+        }
+        top += height;
+    }
+    None
 }
 
 fn asset_frames(editor: &Editor, clip: &Clip) -> Option<i64> {

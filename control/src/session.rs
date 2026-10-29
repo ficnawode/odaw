@@ -173,7 +173,7 @@ impl<E: Effects> Session<E> {
         let selection_pruned = self.selection.retain_existing(self.history.current());
         let mut events = vec![
             Event::ProjectChanged {
-                changes: step.changes,
+                changes: Box::new(step.changes),
             },
             Event::HistoryChanged {
                 can_undo: self.history.can_undo(),
@@ -194,7 +194,7 @@ impl<E: Effects> Session<E> {
         let selection_pruned = self.selection.retain_existing(self.history.current());
         let mut events = vec![
             Event::ProjectChanged {
-                changes: step.changes,
+                changes: Box::new(step.changes),
             },
             Event::HistoryChanged {
                 can_undo: self.history.can_undo(),
@@ -263,7 +263,7 @@ impl<E: Effects> Session<E> {
         let selection_pruned = self.selection.retain_existing(self.history.current());
         let mut events = outcome.events;
         events.push(Event::ProjectChanged {
-            changes: outcome.changes,
+            changes: Box::new(outcome.changes),
         });
         events.push(Event::HistoryChanged {
             can_undo: self.history.can_undo(),

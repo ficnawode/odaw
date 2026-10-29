@@ -582,7 +582,7 @@ Notes:
 | `Asset` | data | Immutable media (audio file, MIDI file, impulse response). |
 | `AssetId` | data | Content hash of an asset. |
 | `AssetStore` | runtime | Maps `AssetId` to metadata and file location. |
-| `AutomationLane` | data | Keyframes that drive one parameter over time. Stored on the owning node under its `ParamId`. |
+| `AutomationLane` | data | Keyframes that drive one parameter over time, plus mode and enabled flag. Stored on the owning node under its `ParamId`. |
 | `Keyframe` | data | A value at a `Tick`, with a curve. |
 | `Modulator` | data | A `Node` that outputs a signal. |
 | `ModulationLink` | data | `(source: NodeId, amount)`. Stored on the target node under its `ParamId`; a link from a `Modulator` node to a parameter. |

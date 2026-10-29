@@ -2,6 +2,7 @@ use std::num::NonZeroUsize;
 
 use thiserror::Error;
 
+use crate::automation::AutomationPlan;
 use crate::param::ParamBuffer;
 use crate::plan::{Block, BufferId, CompiledProject, NoteEvent, RenderPlan};
 
@@ -9,6 +10,7 @@ use crate::plan::{Block, BufferId, CompiledProject, NoteEvent, RenderPlan};
 pub struct Engine {
     plan: RenderPlan,
     params: ParamBuffer,
+    automation: AutomationPlan,
     buffers: Vec<Vec<f32>>,
     scratch: Vec<f32>,
     block_size: usize,
@@ -29,6 +31,8 @@ impl Engine {
             plan,
             params,
             meters: _,
+            automation,
+            parameters: _,
         } = compiled;
         if plan.sample_rate == 0 {
             return Err(EngineError::ZeroSampleRate);
@@ -85,6 +89,7 @@ impl Engine {
         Ok(Self {
             plan,
             params,
+            automation,
             buffers,
             scratch: vec![0.0; buffer_size],
             block_size: block_size.get(),
@@ -120,6 +125,26 @@ impl Engine {
         &mut self.params
     }
 
+    pub fn automation(&self) -> &AutomationPlan {
+        &self.automation
+    }
+
+    pub fn set_automation(&mut self, automation: AutomationPlan) {
+        self.automation = automation;
+    }
+
+    /// Swap the plan and hand the previous one back for control-side cleanup.
+    pub fn replace_automation(&mut self, automation: AutomationPlan) -> AutomationPlan {
+        std::mem::replace(&mut self.automation, automation)
+    }
+
+    /// Number of frames that can be processed before the next automation
+    /// boundary. Callers split their block here so a keyframe corner cannot be
+    /// smeared across a block boundary.
+    pub fn next_automation_boundary(&self, frame: u64, limit: usize) -> usize {
+        self.automation.next_boundary(frame, limit)
+    }
+
     pub fn process_block(
         &mut self,
         frames: usize,
@@ -153,6 +178,7 @@ impl Engine {
         let Engine {
             plan,
             params,
+            automation,
             buffers,
             scratch,
             start_frame,
@@ -169,6 +195,9 @@ impl Engine {
                 required,
             });
         }
+
+        params.clear_ramps();
+        automation.apply(*start_frame, frames, params);
 
         for step in &mut plan.steps {
             scratch[..required].fill(0.0);
@@ -316,6 +345,8 @@ mod tests {
             },
             params: ParamBuffer::new(),
             meters: crate::MeterBank::default(),
+            automation: AutomationPlan::default(),
+            parameters: std::collections::BTreeMap::new(),
         }
     }
 

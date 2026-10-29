@@ -170,18 +170,43 @@ Remaining:
 
 ## M6 — Automation
 
-The document already stores lanes and keyframes.
+Design: [docs/AUTOMATION.md](docs/AUTOMATION.md). The document already stores
+lanes and keyframes.
 
-- Lane view per parameter, with absolute and trim modes.
-- Draw, move, delete, and curve-edit keyframes; snap and zoom.
-- Automation recording that thins incoming values into keyframes as one
-  transaction.
-- Compiler folds lanes into the DAG; executor evaluates at block boundaries
-  (or per sample for audio-rate parameters).
-- Smoothing policy decision from `DESIGN.md` open item 2.
-- Unmatched lanes are dropped with an event when a device kind changes.
+Implemented:
 
-Acceptance: automate gain and a filter cutoff, hear it, undo a recording pass in
+- `AutomationLane.enabled` and format v5/v4 migration.
+- A pure keyframe evaluator (Hold/Linear, before/after holds, integer rounding,
+  discrete holds) and lane validation.
+- A non-structural automation change channel and a dedicated `AutomationPlan`
+  swap, so point edits never rebuild the device graph.
+- `ParamBuffer` base/effective values, linear ramps, touch overrides, and
+  sample-accurate gain/pan automation in the built-in channel strip.
+- Tempo-aware tick-to-frame compilation; block splitting at keyframes; block
+  size independent offline rendering.
+- A Notes / Automation / Clip bottom-panel split; parameter list, large lane
+  editor, point/marquee/draw gestures, Hold/Linear segments, Absolute/Trim,
+  enable/clear/delete, snap/zoom/fit.
+- Right-click **Show automation** and `A` badges on mixer and plugin controls.
+- Expandable automation lanes under tracks in the arrangement, with a compact
+  overview and click-through to the detailed editor.
+- Touch recording from live parameter gestures with thinning, one-transaction
+  undo, and lane merging.
+- `DeviceProcessor::parameter_info` and a compiler parameter catalog for built-in
+  and VST3 parameters.
+
+Remaining:
+
+- Additional curve shapes beyond Hold/Linear.
+- Write and latch recording modes and punch ranges.
+- Truly sample-accurate VST3 parameter changes (currently one value per chunk
+  with a block-level ramp).
+- Lane copy/paste across parameters and CLI automation commands.
+- Dropping unmatched lanes with an event when a device kind changes (lanes are
+  currently retained by `ParamId` and ignored if the replacement device does
+  not expose them).
+
+Acceptance: automate gain and a VST3 parameter, hear it, undo a recording pass in
 one step, save/reopen, and render deterministically.
 
 ## M7 — Plugin backends

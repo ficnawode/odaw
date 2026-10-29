@@ -383,7 +383,11 @@ fn dispatch_param(command: &ParamCommand, tx: &mut Tx) -> Result<(), DispatchErr
 fn dispatch_automation(command: &AutomationCommand, tx: &mut Tx) -> Result<(), DispatchError> {
     match command {
         AutomationCommand::Set { node, param, lane } => {
-            if !tx.set_automation(*node, param.clone(), lane.clone()) {
+            let lane = lane.as_ref().map(|lane| lane.normalized()).transpose()?;
+            if let Some(lane) = &lane {
+                lane.validate()?;
+            }
+            if !tx.set_automation(*node, param.clone(), lane) {
                 return Err(DispatchError::MissingNode(*node));
             }
         }
@@ -649,6 +653,8 @@ pub enum DispatchError {
     MissingSection(SectionId),
     #[error("invalid tempo map: {0}")]
     Tempo(#[from] odaw_core::TempoError),
+    #[error("invalid automation: {0}")]
+    Automation(#[from] odaw_core::AutomationError),
 }
 
 #[cfg(test)]
@@ -1102,6 +1108,7 @@ mod tests {
                 param: ParamId::new("gain"),
                 lane: Some(AutomationLane {
                     mode: AutomationMode::Absolute,
+                    enabled: true,
                     keyframes: [Keyframe {
                         tick: Tick::ZERO,
                         value: ParamValue::Float(0.5),

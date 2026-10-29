@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::dto::{
-    AssetDto, AutomationLaneDto, ClipDto, EdgeDto, LoopRegionDto, MarkerDto, MetaDto,
+    AssetDto, AutomationLaneDtoV4, ClipDto, EdgeDto, LoopRegionDto, MarkerDto, MetaDto,
     ModulationLinkDto, NodeDto, NodeRoleDto, ParamValueDto, PortDto, ProjectDto, SectionDto,
     SectionRefDto, TempoMapDto, TimeSignatureDto,
 };
@@ -37,7 +37,7 @@ pub struct NodeDtoV2 {
     pub rack: Vec<u64>,
     pub ports: Vec<PortDto>,
     pub params: BTreeMap<String, ParamValueDto>,
-    pub automation: BTreeMap<String, AutomationLaneDto>,
+    pub automation: BTreeMap<String, AutomationLaneDtoV4>,
     pub modulations: BTreeMap<String, Vec<ModulationLinkDto>>,
     pub clips: Vec<u64>,
     pub state: Option<Vec<u8>>,
@@ -84,7 +84,11 @@ impl From<NodeDtoV2> for NodeDto {
             rack: node.rack,
             ports: node.ports,
             params: node.params,
-            automation: node.automation,
+            automation: node
+                .automation
+                .into_iter()
+                .map(|(id, lane)| (id, lane.into()))
+                .collect(),
             modulations: node.modulations,
             clips: node.clips,
             state: node.state,

@@ -1,20 +1,22 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use odaw_compile::Compiler;
+use odaw_compile::{Compiler, compile_automation};
 use odaw_control::{
-    AssetCommand, ClipCommand, Command, CommandKind, DeviceCommand, EdgeCommand, Event,
-    NodeCommand, NoteCommand, ParamChange, ParamCommand, Session, SessionError, TempoCommand,
+    AssetCommand, AutomationCommand, ClipCommand, Command, CommandKind, DeviceCommand, EdgeCommand,
+    Event, NodeCommand, NoteCommand, ParamChange, ParamCommand, Session, SessionError,
+    TempoCommand,
 };
 use odaw_core::{
-    Asset, AssetId, AssetKind, ChannelLayout, Clip, ClipContent, ClipId, Edge, Frames, Node,
-    NodeId, NodeKind, NodePort, NodeRole, Note, NoteId, PPQ, ParamAddress, ParamId, ParamValue,
-    Port, PortDirection, PortId, Project, TempoPoint, Tick, TimeSignature,
+    Asset, AssetId, AssetKind, AutomationLane, ChannelLayout, Clip, ClipContent, ClipId, Edge,
+    Frames, Node, NodeId, NodeKind, NodePort, NodeRole, Note, NoteId, PPQ, ParamAddress, ParamId,
+    ParamValue, Port, PortDirection, PortId, Project, TempoPoint, Tick, TimeSignature,
 };
 use odaw_dsp::{AudioAsset, AudioSources, demo};
-use odaw_engine::DeviceParameter;
+use odaw_engine::{DeviceParameter, ParamBuffer};
 use odaw_engine::{RealtimeEngine, RealtimeHandle, RealtimeState, realtime};
 use odaw_format::Container;
 use odaw_platform::{AudioBackend, AudioCallback};
@@ -35,17 +37,30 @@ pub struct Editor {
     pub cursor: Tick,
     pub status: Option<String>,
     pub error: Option<String>,
+    pub automation_focus: Option<ParamAddress>,
+    recording: bool,
+    record_armed: BTreeSet<ParamAddress>,
+    record_pass: Option<RecordPass>,
     audio: Option<AudioSession>,
     audio_error: Option<String>,
+    last_audio_retry: Option<Instant>,
     imported: HashMap<AssetId, ImportedAudio>,
     note_clipboard: Option<NoteClipboard>,
     vst3: Vst3Backend,
+    parameters: BTreeMap<ParamAddress, DeviceParameter>,
+    param_buffer: ParamBuffer,
 }
 
 #[derive(Clone, Debug)]
 struct NoteClipboard {
     notes: Vec<Note>,
     origin: Tick,
+}
+
+#[derive(Clone, Debug)]
+struct RecordPass {
+    target: ParamAddress,
+    points: Vec<(Tick, ParamValue)>,
 }
 
 #[derive(Clone, Debug)]
@@ -102,11 +117,18 @@ impl Editor {
             cursor: Tick::ZERO,
             status: None,
             error,
+            automation_focus: None,
+            recording: false,
+            record_armed: BTreeSet::new(),
+            record_pass: None,
             audio: None,
             audio_error: None,
+            last_audio_retry: None,
             imported: HashMap::new(),
             note_clipboard: None,
             vst3: Vst3Backend::load_cached(),
+            parameters: BTreeMap::new(),
+            param_buffer: ParamBuffer::new(),
         };
         editor.ensure_selection();
         editor.load_imported_assets();
@@ -294,8 +316,10 @@ impl Editor {
 
     pub fn start_audio(&mut self) {
         match self.create_audio() {
-            Ok(audio) => {
+            Ok((audio, params, parameters)) => {
                 self.audio = Some(audio);
+                self.param_buffer = params;
+                self.parameters = parameters;
                 self.audio_error = None;
             }
             Err(error) => {
@@ -307,10 +331,19 @@ impl Editor {
         }
     }
 
-    fn create_audio(&self) -> Result<AudioSession, String> {
+    fn create_audio(
+        &self,
+    ) -> Result<
+        (
+            AudioSession,
+            ParamBuffer,
+            BTreeMap<ParamAddress, DeviceParameter>,
+        ),
+        String,
+    > {
         let project = self.session.project();
         let sources = self.audio_sources();
-        let (state, end_frame) =
+        let (state, end_frame, params, parameters) =
             self.prepare_state_at(project, frames_at(project, self.cursor), &sources)?;
         let sample_rate = state.engine.sample_rate();
         let channels = u16::try_from(state.engine.channels())
@@ -318,12 +351,16 @@ impl Editor {
         let (engine, handle) = realtime(state, 16);
         let backend = AudioBackend::start(Player { engine }, sample_rate, channels)
             .map_err(|error| error.to_string())?;
-        Ok(AudioSession {
-            backend,
-            handle,
-            sample_rate,
-            end_frame,
-        })
+        Ok((
+            AudioSession {
+                backend,
+                handle,
+                sample_rate,
+                end_frame,
+            },
+            params,
+            parameters,
+        ))
     }
 
     pub fn tick(&mut self) -> bool {
@@ -346,11 +383,27 @@ impl Editor {
                     self.cursor = tick;
                 }
             }
+            self.finish_recording();
         }
         if failed {
+            eprintln!("audio stream lost; rebuilding");
+            let was_playing = self.playing;
             self.audio = None;
-            self.audio_error = Some("the audio output stream failed".to_owned());
             self.playing = false;
+            let now = Instant::now();
+            let retry = self
+                .last_audio_retry
+                .is_none_or(|last| now.duration_since(last) >= Duration::from_secs(2));
+            if retry {
+                self.last_audio_retry = Some(now);
+                self.audio_error = Some("audio stream lost; reconnecting".to_owned());
+                self.start_audio();
+                if was_playing && self.audio.is_some() {
+                    self.play();
+                }
+            } else {
+                self.audio_error = Some("the audio stream was lost".to_owned());
+            }
         } else if self.playing {
             self.cursor = self.playhead_tick();
         }
@@ -403,7 +456,7 @@ impl Editor {
         let Some(audio) = &mut self.audio else {
             return;
         };
-        if let Some((state, end_frame)) = prepared {
+        if let Some((state, end_frame, _, _)) = prepared {
             if let Err(error) = audio.handle.publish_at(state, cursor_frame) {
                 self.audio_error = Some(error.to_string());
                 return;
@@ -428,6 +481,7 @@ impl Editor {
             let _ = audio.handle.stop();
         }
         self.playing = false;
+        self.finish_recording();
     }
 
     pub fn cursor_tick(&self) -> Tick {
@@ -475,13 +529,15 @@ impl Editor {
             return;
         };
         match prepared {
-            Ok((state, end_frame)) => {
+            Ok((state, end_frame, params, parameters)) => {
                 if let Err(error) = audio.handle.publish_at(state, start) {
                     self.audio_error = Some(error.to_string());
                     self.playing = false;
                     return;
                 }
                 audio.end_frame = end_frame;
+                self.param_buffer = params;
+                self.parameters = parameters;
                 self.audio_error = None;
                 if was_playing {
                     match audio.handle.play() {
@@ -901,27 +957,126 @@ impl Editor {
         }
     }
 
+    pub fn parameter_info(&self, address: &ParamAddress) -> Option<&DeviceParameter> {
+        self.parameters.get(address)
+    }
+
+    pub fn parameter_entries(&self, node: NodeId) -> Vec<(ParamAddress, DeviceParameter)> {
+        self.parameters
+            .iter()
+            .filter(|(address, _)| address.node == node)
+            .map(|(address, parameter)| (address.clone(), parameter.clone()))
+            .collect()
+    }
+
+    pub fn parameter_default(&self, address: &ParamAddress) -> ParamValue {
+        self.parameters
+            .get(address)
+            .map_or(ParamValue::Float(0.0), |parameter| parameter.default)
+    }
+
+    /// The base value a lane offsets or replaces. Falls back to the parameter
+    /// descriptor when the document has no explicit value.
+    pub fn base_param_value(&self, address: &ParamAddress) -> ParamValue {
+        self.session
+            .project()
+            .nodes
+            .get(&address.node)
+            .and_then(|node| node.params.get(&address.param).copied())
+            .unwrap_or_else(|| self.parameter_default(address))
+    }
+
+    pub fn automation_lane(&self, node: NodeId, param: &ParamId) -> Option<AutomationLane> {
+        self.session
+            .project()
+            .nodes
+            .get(&node)?
+            .automation
+            .get(param)
+            .cloned()
+    }
+
+    pub fn request_automation(&mut self, address: ParamAddress) {
+        self.automation_focus = Some(address);
+    }
+
+    /// The effective value the lane produces at `tick`, including trim mode.
+    /// This is display state; playback uses the compiled automation plan.
+    pub fn automation_value(&self, address: &ParamAddress, tick: Tick) -> Option<ParamValue> {
+        let node = self.session.project().nodes.get(&address.node)?;
+        let lane = node.automation.get(&address.param)?;
+        if !lane.is_active() {
+            return None;
+        }
+        let value = lane.value_at(tick)?;
+        Some(match lane.mode {
+            odaw_core::AutomationMode::Absolute => value,
+            odaw_core::AutomationMode::Trim => self.base_param_value(address).offset(value),
+        })
+    }
+
+    pub fn set_automation(
+        &mut self,
+        node: NodeId,
+        param: ParamId,
+        lane: Option<AutomationLane>,
+    ) -> bool {
+        let result = self
+            .session
+            .apply_command(Command::new(CommandKind::Automation(
+                AutomationCommand::Set { node, param, lane },
+            )));
+        self.after_edit(result)
+    }
+
+    /// Create a lane with one point at the cursor so it is immediately visible.
+    pub fn add_automation_lane(&mut self, address: &ParamAddress) -> bool {
+        let value = self
+            .automation_value(address, self.cursor)
+            .unwrap_or_else(|| self.base_param_value(address));
+        let lane = AutomationLane {
+            mode: odaw_core::AutomationMode::Absolute,
+            enabled: true,
+            keyframes: [odaw_core::Keyframe {
+                tick: self.cursor,
+                value,
+                curve: odaw_core::Curve::Linear,
+            }]
+            .into_iter()
+            .collect(),
+        };
+        self.set_automation(address.node, address.param.clone(), Some(lane))
+    }
+
     pub fn preview_param(&mut self, node: NodeId, param: &str, value: f64) {
         let address = ParamAddress {
             node,
             param: ParamId::new(param),
         };
         if let Some(audio) = &mut self.audio {
-            let _ = audio.handle.set_param(address, ParamValue::Float(value));
+            let _ = audio
+                .handle
+                .set_param(address.clone(), ParamValue::Float(value));
+            let _ = audio.handle.set_touch(address.clone(), true);
         }
+        self.capture_automation(address, value);
     }
 
     /// Commit a fader value to the document and its history without rebuilding
     /// the audio graph. `ParamChange::Value` never touches layout.
     pub fn commit_param(&mut self, node: NodeId, param: &str, value: f64) {
+        let address = ParamAddress {
+            node,
+            param: ParamId::new(param),
+        };
         self.preview_param(node, param, value);
+        if let Some(audio) = &mut self.audio {
+            let _ = audio.handle.set_touch(address.clone(), false);
+        }
         let result =
             self.session
                 .apply_command(Command::new(CommandKind::Param(ParamCommand::Set {
-                    address: ParamAddress {
-                        node,
-                        param: ParamId::new(param),
-                    },
+                    address,
                     value: ParamValue::Float(value),
                     change: ParamChange::Value,
                 })));
@@ -929,6 +1084,102 @@ impl Editor {
             Ok(_) => self.error = None,
             Err(error) => self.error = Some(error.to_string()),
         }
+        self.finish_recording();
+    }
+
+    pub fn recording(&self) -> bool {
+        self.recording
+    }
+
+    pub fn toggle_recording(&mut self) {
+        self.recording = !self.recording;
+        if !self.recording {
+            self.finish_recording();
+        }
+    }
+
+    pub fn automation_armed(&self, address: &ParamAddress) -> bool {
+        self.record_armed.contains(address)
+    }
+
+    pub fn set_automation_armed(&mut self, address: ParamAddress, armed: bool) {
+        if armed {
+            self.record_armed.insert(address);
+        } else {
+            self.record_armed.remove(&address);
+        }
+    }
+
+    fn capture_automation(&mut self, address: ParamAddress, value: f64) {
+        if !self.recording || !self.playing || !self.record_armed.contains(&address) {
+            return;
+        }
+        let tick = self.playhead_tick();
+        let different = self
+            .record_pass
+            .as_ref()
+            .is_some_and(|pass| pass.target != address);
+        if different {
+            self.finish_recording();
+        }
+        let pass = self.record_pass.get_or_insert_with(|| RecordPass {
+            target: address.clone(),
+            points: Vec::new(),
+        });
+        if let Some((last_tick, last_value)) = pass.points.last_mut() {
+            if *last_tick == tick {
+                *last_value = ParamValue::Float(value);
+                return;
+            }
+        }
+        pass.points.push((tick, ParamValue::Float(value)));
+    }
+
+    fn finish_recording(&mut self) {
+        let Some(pass) = self.record_pass.take() else {
+            return;
+        };
+        if pass.points.is_empty() {
+            return;
+        }
+        let range = self.parameter_info(&pass.target).map_or(1.0, |parameter| {
+            (parameter.max - parameter.min).abs().max(1.0e-9)
+        });
+        let points = thin_points(&pass.points, range);
+        let mut lane = self
+            .automation_lane(pass.target.node, &pass.target.param)
+            .unwrap_or(AutomationLane {
+                mode: odaw_core::AutomationMode::Absolute,
+                enabled: true,
+                keyframes: [].into_iter().collect(),
+            });
+        let first = points.first().map(|(tick, _)| *tick).unwrap_or(Tick::ZERO);
+        let last = points.last().map(|(tick, _)| *tick).unwrap_or(Tick::ZERO);
+        let mut merged: Vec<odaw_core::Keyframe> = lane
+            .keyframes
+            .iter()
+            .filter(|point| point.tick < first || point.tick > last)
+            .cloned()
+            .collect();
+        merged.extend(points.into_iter().map(|(tick, value)| odaw_core::Keyframe {
+            tick,
+            value,
+            curve: odaw_core::Curve::Linear,
+        }));
+        merged.sort_by_key(|point| point.tick);
+        let mut deduped: Vec<odaw_core::Keyframe> = Vec::with_capacity(merged.len());
+        for point in merged {
+            if deduped
+                .last()
+                .is_some_and(|previous| previous.tick == point.tick)
+            {
+                deduped.pop();
+            }
+            deduped.push(point);
+        }
+        lane.keyframes = deduped.into_iter().collect();
+        lane.enabled = true;
+        self.set_automation(pass.target.node, pass.target.param, Some(lane));
     }
 
     /// Copy live plugin component/controller state and parameter values into
@@ -1969,11 +2220,19 @@ impl Editor {
 
     fn after_edit(&mut self, result: Result<Vec<Event>, SessionError>) -> bool {
         match result {
-            Ok(_) => {
+            Ok(events) => {
                 self.error = None;
                 self.ensure_selection();
+                let automation_only = events.iter().any(|event| {
+                    matches!(
+                        event,
+                        Event::ProjectChanged { changes } if changes.is_automation_only()
+                    )
+                });
                 if self.audio.is_none() {
                     self.start_audio();
+                } else if automation_only {
+                    self.apply_automation();
                 } else {
                     self.rebuild_audio(true);
                 }
@@ -1982,6 +2241,23 @@ impl Editor {
             Err(error) => {
                 self.error = Some(error.to_string());
                 false
+            }
+        }
+    }
+
+    fn apply_automation(&mut self) {
+        let project = self.session.project().clone();
+        let plan = match compile_automation(&project, &self.param_buffer) {
+            Ok(plan) => plan,
+            Err(error) => {
+                self.error = Some(error.to_string());
+                return;
+            }
+        };
+        if let Some(audio) = &mut self.audio {
+            match audio.handle.set_automation(plan) {
+                Ok(()) => self.audio_error = None,
+                Err(error) => self.audio_error = Some(error.to_string()),
             }
         }
     }
@@ -1996,13 +2272,15 @@ impl Editor {
             return;
         };
         match prepared {
-            Ok((state, end_frame)) => {
+            Ok((state, end_frame, params, parameters)) => {
                 if let Err(error) = audio.handle.publish_at(state, start) {
                     self.audio_error = Some(error.to_string());
                     self.playing = false;
                     return;
                 }
                 audio.end_frame = end_frame;
+                self.param_buffer = params;
+                self.parameters = parameters;
                 self.audio_error = None;
                 if was_playing {
                     match audio.handle.play() {
@@ -2028,7 +2306,15 @@ impl Editor {
         project: &Project,
         start_frame: u64,
         audio_sources: &AudioSources,
-    ) -> Result<(RealtimeState, u64), String> {
+    ) -> Result<
+        (
+            RealtimeState,
+            u64,
+            ParamBuffer,
+            BTreeMap<ParamAddress, DeviceParameter>,
+        ),
+        String,
+    > {
         self.prepare_state_at_with(project, start_frame, audio_sources, true)
     }
 
@@ -2038,7 +2324,15 @@ impl Editor {
         start_frame: u64,
         audio_sources: &AudioSources,
         capture_plugin_state: bool,
-    ) -> Result<(RealtimeState, u64), String> {
+    ) -> Result<
+        (
+            RealtimeState,
+            u64,
+            ParamBuffer,
+            BTreeMap<ParamAddress, DeviceParameter>,
+        ),
+        String,
+    > {
         let project = if capture_plugin_state {
             self.project_with_plugin_state(project)
         } else {
@@ -2087,12 +2381,47 @@ fn frames_at(project: &Project, tick: Tick) -> u64 {
         .unwrap_or(0)
 }
 
+fn thin_points(points: &[(Tick, ParamValue)], range: f64) -> Vec<(Tick, ParamValue)> {
+    if points.len() <= 2 {
+        return points.to_vec();
+    }
+    let minimum_gap = (PPQ / 64).max(1);
+    let minimum_value = range * 0.005;
+    let mut thinned = Vec::with_capacity(points.len());
+    thinned.push(points[0]);
+    for point in points.iter().skip(1).take(points.len().saturating_sub(2)) {
+        let previous = thinned
+            .last()
+            .copied()
+            .expect("the first point is always retained");
+        let tick_gap = point.0.raw().saturating_sub(previous.0.raw());
+        let value_gap = (point.1.as_f64() - previous.1.as_f64()).abs();
+        if tick_gap >= minimum_gap || value_gap >= minimum_value {
+            thinned.push(*point);
+        }
+    }
+    let last = points[points.len() - 1];
+    if thinned.last().is_some_and(|point| point.0 == last.0) {
+        thinned.pop();
+    }
+    thinned.push(last);
+    thinned
+}
+
 fn prepare_state_at(
     project: &Project,
     start_frame: u64,
     audio_sources: &AudioSources,
     vst3: &Vst3Backend,
-) -> Result<(RealtimeState, u64), String> {
+) -> Result<
+    (
+        RealtimeState,
+        u64,
+        ParamBuffer,
+        BTreeMap<ParamAddress, DeviceParameter>,
+    ),
+    String,
+> {
     let block_size = 8192;
     let compiled = Compiler::builtin()
         .with_factory(vst3.factory())
@@ -2103,6 +2432,8 @@ fn prepare_state_at(
     let end_frame = project_end_frame(project)
         .map_err(|error| error.to_string())?
         .unwrap_or(u64::from(sample_rate) * 5);
+    let params = compiled.params.clone();
+    let parameters = compiled.parameters.clone();
     let state = RealtimeState::new_at(
         compiled,
         project,
@@ -2111,7 +2442,7 @@ fn prepare_state_at(
         start_frame,
     )
     .map_err(|error| error.to_string())?;
-    Ok((state, end_frame))
+    Ok((state, end_frame, params, parameters))
 }
 
 fn track_color(id: NodeId) -> u32 {
@@ -2310,9 +2641,16 @@ mod tests {
             error: None,
             audio: None,
             audio_error: None,
+            last_audio_retry: None,
             imported: HashMap::new(),
             note_clipboard: None,
             vst3: Vst3Backend::new(Catalog::default()),
+            automation_focus: None,
+            recording: false,
+            record_armed: BTreeSet::new(),
+            record_pass: None,
+            parameters: BTreeMap::new(),
+            param_buffer: ParamBuffer::new(),
         }
     }
 
@@ -2762,6 +3100,19 @@ mod tests {
         editor.select_all_clips();
         editor.delete_selected_clips();
         assert!(editor.session.project().clips.is_empty());
+    }
+
+    #[test]
+    fn automation_recording_thinning_keeps_endpoints() {
+        let points = vec![
+            (Tick::ZERO, ParamValue::Float(0.0)),
+            (Tick::from_raw(100), ParamValue::Float(0.0)),
+            (Tick::from_raw(PPQ), ParamValue::Float(1.0)),
+        ];
+        let thinned = thin_points(&points, 1.0);
+        assert_eq!(thinned.first().unwrap().0, Tick::ZERO);
+        assert_eq!(thinned.last().unwrap().0, Tick::from_raw(PPQ));
+        assert!(thinned.len() < points.len());
     }
 
     #[test]

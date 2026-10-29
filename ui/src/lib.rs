@@ -1,4 +1,5 @@
 pub mod app;
+pub mod automation;
 pub mod editor;
 pub mod mixer;
 pub mod options;

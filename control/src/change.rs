@@ -16,6 +16,7 @@ pub struct ChangeSet {
     pub markers: BTreeSet<MarkerId>,
     pub assets: BTreeSet<AssetId>,
     pub params: BTreeSet<ParamAddress>,
+    pub automation: BTreeSet<ParamAddress>,
 }
 
 impl ChangeSet {
@@ -32,6 +33,7 @@ impl ChangeSet {
         self.markers.extend(other.markers);
         self.assets.extend(other.assets);
         self.params.extend(other.params);
+        self.automation.extend(other.automation);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -47,10 +49,27 @@ impl ChangeSet {
             && self.markers.is_empty()
             && self.assets.is_empty()
             && self.params.is_empty()
+            && self.automation.is_empty()
     }
 
     pub fn is_structural(&self) -> bool {
         self.structural
+    }
+
+    pub fn is_automation_only(&self) -> bool {
+        !self.structural
+            && !self.layout_or_latency
+            && !self.meta_or_tempo
+            && !self.arrangement
+            && self.nodes.is_empty()
+            && self.edges.is_empty()
+            && self.clips.is_empty()
+            && self.notes.is_empty()
+            && self.sections.is_empty()
+            && self.markers.is_empty()
+            && self.assets.is_empty()
+            && self.params.is_empty()
+            && !self.automation.is_empty()
     }
 
     pub fn requires_validation(&self) -> bool {

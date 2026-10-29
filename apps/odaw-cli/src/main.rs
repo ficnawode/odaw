@@ -8,8 +8,14 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use odaw_compile::{CompileError, Compiler};
-use odaw_control::{RenameProject, Session, SessionError};
-use odaw_core::{AssetId, AssetKind, NodeRole, Project, ProjectError, TempoError};
+use odaw_control::{
+    AutomationCommand as AutomationEdit, Command as ControlCommand,
+    CommandKind as ControlCommandKind, RenameProject, Session, SessionError,
+};
+use odaw_core::{
+    AssetId, AssetKind, AutomationLane, AutomationMode, Curve, Keyframe, NodeRole, ParamId,
+    ParamValue, Project, ProjectError, TempoError, Tick,
+};
 use odaw_dsp::{AudioAsset, AudioSources, demo};
 use odaw_engine::{RealtimeEngine, RealtimeError, RealtimeState, RealtimeStateError, realtime};
 use odaw_format::{Container, ContainerError, ProjectFile};
@@ -66,6 +72,12 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Create the Dexed arrangement with automation on synth, reverb, pan, and master parameters.
+    DemoAutomation {
+        path: PathBuf,
+        #[arg(long)]
+        force: bool,
+    },
     /// Render a project to a 16-bit PCM WAV file.
     Render {
         path: PathBuf,
@@ -92,6 +104,41 @@ enum Command {
         refresh: bool,
         #[arg(long)]
         json: bool,
+    },
+    /// Inspect or edit parameter automation.
+    Automation {
+        #[command(subcommand)]
+        command: AutomationCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AutomationCommand {
+    /// Print every automation lane in a project.
+    List { path: PathBuf },
+    /// Add a keyframe, creating the lane when necessary.
+    Set {
+        path: PathBuf,
+        #[arg(long)]
+        node: u64,
+        #[arg(long)]
+        param: String,
+        #[arg(long)]
+        tick: i64,
+        #[arg(long, allow_hyphen_values = true)]
+        value: f64,
+        #[arg(long)]
+        trim: bool,
+        #[arg(long)]
+        hold: bool,
+    },
+    /// Remove a lane.
+    Clear {
+        path: PathBuf,
+        #[arg(long)]
+        node: u64,
+        #[arg(long)]
+        param: String,
     },
 }
 
@@ -120,6 +167,9 @@ fn run() -> Result<(), CliError> {
         Command::DemoDexed { path, force } => {
             dexed_demo::create(&path, force).map_err(CliError::Demo)
         }
+        Command::DemoAutomation { path, force } => {
+            dexed_demo::create_automation(&path, force).map_err(CliError::Demo)
+        }
         Command::Render {
             path,
             output,
@@ -129,6 +179,111 @@ fn run() -> Result<(), CliError> {
         Command::Play { path, duration } => play_project(&path, duration),
         Command::Validate { path } => validate_project(&path),
         Command::Plugins { refresh, json } => list_plugins(refresh, json),
+        Command::Automation { command } => automation(command),
+    }
+}
+
+fn automation(command: AutomationCommand) -> Result<(), CliError> {
+    match command {
+        AutomationCommand::List { path } => {
+            let project = Container::new(&path).load()?;
+            for (id, node) in &project.nodes {
+                for (param, lane) in &node.automation {
+                    let name = node
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| format!("node {}", id.raw()));
+                    println!(
+                        "{name} ({}) {param} [{}]{}",
+                        id.raw(),
+                        match lane.mode {
+                            AutomationMode::Absolute => "absolute",
+                            AutomationMode::Trim => "trim",
+                        },
+                        if lane.enabled { "" } else { " disabled" }
+                    );
+                    for point in &lane.keyframes {
+                        println!(
+                            "  tick {}  {:?}  {:?}",
+                            point.tick.raw(),
+                            point.value,
+                            point.curve
+                        );
+                    }
+                }
+            }
+            Ok(())
+        }
+        AutomationCommand::Set {
+            path,
+            node,
+            param,
+            tick,
+            value,
+            trim,
+            hold,
+        } => {
+            let project = Container::new(&path).load()?;
+            let node_id = odaw_core::NodeId::from_raw(node);
+            let param = ParamId::new(param);
+            let existing = project
+                .nodes
+                .get(&node_id)
+                .and_then(|node| node.automation.get(&param).cloned());
+            let value = existing
+                .as_ref()
+                .and_then(|lane| lane.keyframes.front())
+                .map_or(ParamValue::Float(value), |point| match point.value {
+                    ParamValue::Float(_) => ParamValue::Float(value),
+                    ParamValue::Int(_) => ParamValue::Int(value.round() as i64),
+                    ParamValue::Bool(_) => ParamValue::Bool(value >= 0.5),
+                    ParamValue::Enum(_) => ParamValue::Enum(value.max(0.0).round() as u32),
+                });
+            let mut lane = existing.unwrap_or(AutomationLane {
+                mode: if trim {
+                    AutomationMode::Trim
+                } else {
+                    AutomationMode::Absolute
+                },
+                enabled: true,
+                keyframes: [].into_iter().collect(),
+            });
+            lane.mode = if trim {
+                AutomationMode::Trim
+            } else {
+                AutomationMode::Absolute
+            };
+            lane.keyframes.push_back(Keyframe {
+                tick: Tick::from_raw(tick),
+                value,
+                curve: if hold { Curve::Hold } else { Curve::Linear },
+            });
+            let mut session = Session::new(project)?;
+            session.apply_command(ControlCommand::new(ControlCommandKind::Automation(
+                AutomationEdit::Set {
+                    node: node_id,
+                    param,
+                    lane: Some(lane),
+                },
+            )))?;
+            Container::new(&path).save(session.project())?;
+            println!("updated automation on {}", path.display());
+            Ok(())
+        }
+        AutomationCommand::Clear { path, node, param } => {
+            let project = Container::new(&path).load()?;
+            let mut session = Session::new(project)?;
+            session.apply_command(ControlCommand::new(ControlCommandKind::Automation(
+                AutomationEdit::Set {
+                    node: odaw_core::NodeId::from_raw(node),
+                    param: ParamId::new(param),
+                    lane: None,
+                },
+            )))?;
+            Container::new(&path).save(session.project())?;
+            println!("cleared automation on {}", path.display());
+            Ok(())
+        }
     }
 }
 

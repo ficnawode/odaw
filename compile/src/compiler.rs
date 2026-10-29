@@ -11,8 +11,8 @@ use odaw_dsp::{
     STRIP_GAIN_PARAM, STRIP_PAN_PARAM, Silence,
 };
 use odaw_engine::{
-    BufferId, CompiledProject, DeviceContext, DeviceFactory, DeviceProcessor, MeterBank,
-    ParamBuffer, PlanStep, RenderPlan,
+    AutomationPlan, BufferId, CompiledProject, DeviceContext, DeviceFactory, DeviceParameter,
+    DeviceProcessor, LanePlan, MeterBank, ParamBuffer, PlanStep, PointPlan, RenderPlan,
 };
 use thiserror::Error;
 
@@ -450,6 +450,81 @@ impl Compiler {
                 );
             }
         }
+        // A lane can target a parameter the document never stored. Give it a
+        // slot after device defaults so the default becomes the base value.
+        for (node_id, node) in &project.nodes {
+            for (param, lane) in &node.automation {
+                if !lane.is_active() {
+                    continue;
+                }
+                let initial = node
+                    .params
+                    .get(param)
+                    .copied()
+                    .or_else(|| lane.keyframes.front().map(|point| point.value))
+                    .unwrap_or(ParamValue::Float(0.0));
+                params.ensure(
+                    ParamAddress {
+                        node: *node_id,
+                        param: param.clone(),
+                    },
+                    initial,
+                );
+            }
+        }
+
+        let mut parameters = BTreeMap::new();
+        for step in &steps {
+            for parameter in step.processor.parameter_info() {
+                params.ensure(
+                    ParamAddress {
+                        node: step.node,
+                        param: parameter.id.clone(),
+                    },
+                    parameter.default,
+                );
+                parameters
+                    .entry(ParamAddress {
+                        node: step.node,
+                        param: parameter.id.clone(),
+                    })
+                    .or_insert(parameter);
+            }
+        }
+        for owner in &owners {
+            parameters
+                .entry(ParamAddress {
+                    node: *owner,
+                    param: ParamId::new(STRIP_GAIN_PARAM),
+                })
+                .or_insert(DeviceParameter {
+                    id: ParamId::new(STRIP_GAIN_PARAM),
+                    label: "Gain".to_owned(),
+                    default: ParamValue::Float(0.0),
+                    min: -60.0,
+                    max: 12.0,
+                    step_count: 0,
+                    unit: "dB".to_owned(),
+                    read_only: false,
+                });
+            parameters
+                .entry(ParamAddress {
+                    node: *owner,
+                    param: ParamId::new(STRIP_PAN_PARAM),
+                })
+                .or_insert(DeviceParameter {
+                    id: ParamId::new(STRIP_PAN_PARAM),
+                    label: "Pan".to_owned(),
+                    default: ParamValue::Float(0.0),
+                    min: -1.0,
+                    max: 1.0,
+                    step_count: 0,
+                    unit: String::new(),
+                    read_only: false,
+                });
+        }
+
+        let automation = compile_automation(project, &params)?;
 
         Ok(CompiledProject {
             plan: RenderPlan {
@@ -460,8 +535,67 @@ impl Compiler {
             },
             params,
             meters,
+            automation,
+            parameters,
         })
     }
+}
+
+/// Build the frame-domain automation plan against a stable slot map. This is
+/// also the path used when a point edit swaps only the automation plan.
+pub fn compile_automation(
+    project: &Project,
+    params: &ParamBuffer,
+) -> Result<AutomationPlan, CompileError> {
+    let mut lanes = Vec::new();
+    for (node_id, node) in &project.nodes {
+        for (param, lane) in &node.automation {
+            if !lane.is_active() {
+                continue;
+            }
+            let address = ParamAddress {
+                node: *node_id,
+                param: param.clone(),
+            };
+            let Some(slot) = params.slot(&address) else {
+                return Err(CompileError::MissingParamSlot {
+                    node: *node_id,
+                    param: param.clone(),
+                });
+            };
+            let mut points = Vec::with_capacity(lane.keyframes.len());
+            for keyframe in &lane.keyframes {
+                let frame = project.tempo.tick_to_frames(keyframe.tick)?.raw().max(0) as u64;
+                points.push(PointPlan {
+                    frame,
+                    value: keyframe.value,
+                    curve: keyframe.curve,
+                });
+            }
+            points.sort_by_key(|point| point.frame);
+            let mut deduped: Vec<PointPlan> = Vec::with_capacity(points.len());
+            for point in points {
+                if deduped
+                    .last()
+                    .is_some_and(|previous| previous.frame == point.frame)
+                {
+                    deduped.pop();
+                }
+                deduped.push(point);
+            }
+            if deduped.is_empty() {
+                continue;
+            }
+            lanes.push(LanePlan {
+                address,
+                slot,
+                mode: lane.mode,
+                points: deduped,
+            });
+        }
+    }
+    lanes.sort_by_key(|lane| (lane.address.node.raw(), lane.slot));
+    Ok(AutomationPlan { lanes })
 }
 
 fn master_layout(node_id: NodeId, node: &Node) -> Result<ChannelLayout, CompileError> {
@@ -664,6 +798,8 @@ pub enum CompileError {
     Cycle,
     #[error("a unit depends on a unit that does not exist")]
     MissingDependency,
+    #[error("automation lane {param} on node {node} has no parameter slot")]
+    MissingParamSlot { node: NodeId, param: ParamId },
 }
 
 #[cfg(test)]
@@ -879,6 +1015,9 @@ mod tests {
                 None
             ]
         );
+        for address in compiled.parameters.keys() {
+            assert!(compiled.params.slot(address).is_some());
+        }
     }
 
     #[test]

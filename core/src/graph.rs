@@ -142,6 +142,7 @@ pub struct Keyframe {
 #[derive(Clone, Debug, PartialEq)]
 pub struct AutomationLane {
     pub mode: AutomationMode,
+    pub enabled: bool,
     pub keyframes: PersistentVector<Keyframe>,
 }
 

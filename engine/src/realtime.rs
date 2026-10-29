@@ -6,6 +6,7 @@ use odaw_core::{ParamAddress, ParamValue, Project};
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
 use thiserror::Error;
 
+use crate::automation::AutomationPlan;
 use crate::engine::{Engine, EngineError};
 use crate::meter::MeterBank;
 use crate::plan::CompiledProject;
@@ -53,15 +54,25 @@ enum ToAudio {
         address: ParamAddress,
         value: ParamValue,
     },
+    Touch {
+        address: ParamAddress,
+        active: bool,
+    },
+    SetAutomation(Box<AutomationPlan>),
     Play,
     Stop,
 }
 
+enum Retired {
+    State(Box<RealtimeState>),
+    Automation(Box<AutomationPlan>),
+}
+
 pub struct RealtimeEngine {
     commands: Consumer<ToAudio>,
-    retired: Producer<Box<RealtimeState>>,
+    retired: Producer<Retired>,
     state: Option<RealtimeState>,
-    pending_retired: Option<Box<RealtimeState>>,
+    pending_retired: Option<Retired>,
     playing: bool,
     events: Vec<crate::NoteEvent>,
     position: Arc<AtomicU64>,
@@ -70,7 +81,7 @@ pub struct RealtimeEngine {
 
 pub struct RealtimeHandle {
     commands: Producer<ToAudio>,
-    retired: Consumer<Box<RealtimeState>>,
+    retired: Consumer<Retired>,
     position: Arc<AtomicU64>,
     finished: Arc<AtomicBool>,
     meters: MeterBank,
@@ -145,6 +156,7 @@ impl RealtimeEngine {
                 let remaining = usize::try_from(end.saturating_sub(start)).unwrap_or(usize::MAX);
                 chunk = chunk.min(remaining);
             }
+            chunk = chunk.min(state.engine.next_automation_boundary(start, chunk));
             if chunk == 0 {
                 break;
             }
@@ -182,7 +194,7 @@ impl RealtimeEngine {
             match command {
                 ToAudio::Replace(state) => {
                     if let Some(previous) = self.state.replace(*state) {
-                        self.pending_retired = Some(Box::new(previous));
+                        self.pending_retired = Some(Retired::State(Box::new(previous)));
                     }
                     if let Some(state) = &self.state {
                         self.position
@@ -205,6 +217,18 @@ impl RealtimeEngine {
                         state.engine.params_mut().set(&address, value);
                     }
                 }
+                ToAudio::Touch { address, active } => {
+                    if let Some(state) = &mut self.state {
+                        state.engine.params_mut().set_touch(&address, active);
+                    }
+                }
+                ToAudio::SetAutomation(automation) => {
+                    if let Some(state) = &mut self.state {
+                        let previous = state.engine.replace_automation(*automation);
+                        self.pending_retired = Some(Retired::Automation(Box::new(previous)));
+                        break;
+                    }
+                }
                 ToAudio::Play => {
                     self.playing = true;
                     self.finished.store(false, Ordering::Relaxed);
@@ -217,11 +241,11 @@ impl RealtimeEngine {
     }
 
     fn flush_retired(&mut self) {
-        let Some(state) = self.pending_retired.take() else {
+        let Some(retired) = self.pending_retired.take() else {
             return;
         };
-        if let Err(PushError::Full(state)) = self.retired.push(state) {
-            self.pending_retired = Some(state);
+        if let Err(PushError::Full(retired)) = self.retired.push(retired) {
+            self.pending_retired = Some(retired);
         }
     }
 }
@@ -242,6 +266,14 @@ impl RealtimeHandle {
         value: ParamValue,
     ) -> Result<(), RealtimeError> {
         self.send(ToAudio::Param { address, value })
+    }
+
+    pub fn set_automation(&mut self, automation: AutomationPlan) -> Result<(), RealtimeError> {
+        self.send(ToAudio::SetAutomation(Box::new(automation)))
+    }
+
+    pub fn set_touch(&mut self, address: ParamAddress, active: bool) -> Result<(), RealtimeError> {
+        self.send(ToAudio::Touch { address, active })
     }
 
     pub fn publish(&mut self, state: RealtimeState) -> Result<(), RealtimeError> {
@@ -280,7 +312,12 @@ impl RealtimeHandle {
     }
 
     pub fn collect_retired(&mut self) {
-        while self.retired.pop().is_ok() {}
+        while let Ok(retired) = self.retired.pop() {
+            match retired {
+                Retired::State(state) => drop(state),
+                Retired::Automation(automation) => drop(automation),
+            }
+        }
     }
 
     fn send(&mut self, command: ToAudio) -> Result<(), RealtimeError> {
@@ -351,6 +388,8 @@ mod tests {
                 plan,
                 params: ParamBuffer::new(),
                 meters: MeterBank::default(),
+                automation: crate::AutomationPlan::default(),
+                parameters: std::collections::BTreeMap::new(),
             },
             NonZeroUsize::new(64).unwrap(),
         )
@@ -465,6 +504,8 @@ mod tests {
                 plan,
                 params: ParamBuffer::new(),
                 meters: bank.clone(),
+                automation: crate::AutomationPlan::default(),
+                parameters: std::collections::BTreeMap::new(),
             },
             NonZeroUsize::new(64).unwrap(),
         )

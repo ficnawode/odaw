@@ -4,9 +4,10 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
 use eframe::egui::{self, Color32};
-use odaw_core::{ClipContent, Node, NodeId, PPQ, ParamValue, Tick};
+use odaw_core::{ClipContent, Node, NodeId, PPQ, ParamAddress, ParamValue, Tick};
 use odaw_vst3::{Catalog, EditorWindow};
 
+use crate::automation::AutomationState;
 use crate::editor::{Editor, TRACK_COLORS};
 use crate::mixer::MixerState;
 use crate::options;
@@ -16,8 +17,9 @@ use crate::timeline::{self, TimelineState};
 pub struct OdawApp {
     editor: Editor,
     piano_roll: PianoRollState,
+    automation: AutomationState,
     piano_roll_open: bool,
-    track_options_open: bool,
+    bottom_tab: BottomTab,
     mixer: MixerState,
     timeline: TimelineState,
     rename: Option<RenameState>,
@@ -28,6 +30,13 @@ pub struct OdawApp {
     plugin_filter: PluginFilter,
     plugin_scan: Option<Receiver<Catalog>>,
     plugin_windows: HashMap<NodeId, EditorWindow>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BottomTab {
+    Notes,
+    Automation,
+    Clip,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,8 +68,9 @@ impl OdawApp {
         let mut app = Self {
             editor,
             piano_roll: PianoRollState::default(),
+            automation: AutomationState::default(),
             piano_roll_open: true,
-            track_options_open: false,
+            bottom_tab: BottomTab::Notes,
             mixer: MixerState::default(),
             timeline: TimelineState::default(),
             rename: None,
@@ -93,7 +103,7 @@ impl OdawApp {
 
     fn piano_roll_visible(&self) -> bool {
         self.piano_roll_open
-            && !self.track_options_open
+            && self.bottom_tab == BottomTab::Notes
             && self
                 .editor
                 .selected_clip_any()
@@ -136,11 +146,13 @@ impl OdawApp {
         if redo {
             self.editor.redo();
             self.piano_roll.clear();
+            self.automation.clear();
             self.timeline.clear();
             self.mixer.clear();
         } else if undo {
             self.editor.undo();
             self.piano_roll.clear();
+            self.automation.clear();
             self.timeline.clear();
             self.mixer.clear();
         }
@@ -155,18 +167,28 @@ impl OdawApp {
             self.open_time_dialog();
         }
         if copy {
-            self.editor.copy_selected_notes();
+            if self.bottom_tab == BottomTab::Automation {
+                self.automation.copy(&self.editor);
+            } else {
+                self.editor.copy_selected_notes();
+            }
         }
         if paste {
-            self.editor.paste_notes_at_cursor();
-            self.piano_roll.clear();
+            if self.bottom_tab == BottomTab::Automation {
+                self.automation.paste(&mut self.editor);
+            } else {
+                self.editor.paste_notes_at_cursor();
+                self.piano_roll.clear();
+            }
         }
-        if duplicate {
+        if duplicate && self.bottom_tab != BottomTab::Automation {
             self.editor.duplicate_selected_notes();
             self.piano_roll.clear();
         }
         if select_all {
-            if self.piano_roll_visible() {
+            if self.bottom_tab == BottomTab::Automation {
+                self.automation.select_all(&self.editor);
+            } else if self.piano_roll_visible() {
                 if let Some(clip) = self.editor.selected_clip() {
                     self.editor.select_all_notes(clip);
                 }
@@ -194,7 +216,11 @@ impl OdawApp {
             self.editor.set_cursor(Tick::ZERO);
         }
         if delete {
-            if self.editor.session.selection().notes.is_empty() {
+            if self.bottom_tab == BottomTab::Automation && self.automation.has_selection() {
+                self.automation.delete_selected(&mut self.editor);
+            } else if self.bottom_tab == BottomTab::Automation {
+                self.editor.status = Some("select an automation point first".to_owned());
+            } else if self.editor.session.selection().notes.is_empty() {
                 self.editor.delete_selected_clips();
             } else {
                 self.editor.delete_selected_notes();
@@ -236,6 +262,24 @@ impl OdawApp {
             let play_label = if self.editor.playing { "Stop" } else { "Play" };
             if ui.button(play_label).clicked() {
                 self.editor.toggle_play();
+            }
+            let rec_label = if self.editor.recording() {
+                "Rec ●"
+            } else {
+                "Rec"
+            };
+            if ui
+                .add(
+                    egui::Button::new(rec_label).fill(if self.editor.recording() {
+                        Color32::from_rgb(150, 42, 48)
+                    } else {
+                        Color32::from_rgb(60, 46, 48)
+                    }),
+                )
+                .on_hover_text("Record armed automation while playing")
+                .clicked()
+            {
+                self.editor.toggle_recording();
             }
             if ui
                 .button("Start")
@@ -318,6 +362,7 @@ impl OdawApp {
             {
                 self.editor.undo();
                 self.piano_roll.clear();
+                self.automation.clear();
                 self.timeline.clear();
             }
             let redo_label = self
@@ -334,6 +379,7 @@ impl OdawApp {
             {
                 self.editor.redo();
                 self.piano_roll.clear();
+                self.automation.clear();
                 self.timeline.clear();
             }
             ui.separator();
@@ -343,6 +389,7 @@ impl OdawApp {
             if ui.button("+ Track").clicked() {
                 self.editor.add_track();
                 self.piano_roll.clear();
+                self.automation.clear();
                 self.timeline.clear();
             }
             if ui.button("Plugins").clicked() {
@@ -542,10 +589,23 @@ impl OdawApp {
                                             .param_value(device, parameter.id.as_str())
                                             .unwrap_or_else(|| default_value(&parameter.default));
                                         let mut value = current;
+                                        let address = ParamAddress {
+                                            node: device,
+                                            param: parameter.id.clone(),
+                                        };
+                                        let has_lane = self
+                                            .editor
+                                            .automation_lane(device, &parameter.id)
+                                            .is_some();
                                         ui.horizontal(|ui| {
+                                            let label = if has_lane {
+                                                format!("{}  A", parameter.label)
+                                            } else {
+                                                parameter.label.clone()
+                                            };
                                             let response = ui.add(
                                                 egui::Slider::new(&mut value, 0.0..=1.0)
-                                                    .text(&parameter.label),
+                                                    .text(label),
                                             );
                                             let text =
                                                 if response.changed() || response.hovered() {
@@ -573,6 +633,38 @@ impl OdawApp {
                                                     value,
                                                 );
                                             }
+                                            let menu_address = address.clone();
+                                            response.context_menu(|ui| {
+                                                if ui.button("Show automation").clicked() {
+                                                    self.editor
+                                                        .request_automation(menu_address.clone());
+                                                    ui.close();
+                                                }
+                                                if self
+                                                    .editor
+                                                    .automation_lane(
+                                                        menu_address.node,
+                                                        &menu_address.param,
+                                                    )
+                                                    .is_none()
+                                                {
+                                                    if ui.button("Add automation lane").clicked() {
+                                                        self.editor
+                                                            .add_automation_lane(&menu_address);
+                                                        self.editor.request_automation(
+                                                            menu_address.clone(),
+                                                        );
+                                                        ui.close();
+                                                    }
+                                                } else if ui.button("Clear automation").clicked() {
+                                                    self.editor.set_automation(
+                                                        menu_address.node,
+                                                        menu_address.param.clone(),
+                                                        None,
+                                                    );
+                                                    ui.close();
+                                                }
+                                            });
                                         });
                                     }
                                 });
@@ -844,7 +936,7 @@ impl OdawApp {
                 ui.label(status);
             } else {
                 ui.label(
-                    "Space play/stop · Ctrl+E split · Ctrl+T time · Ctrl+C/V notes · Up/Down moves tracks or transposes notes · right-click menus",
+                    "Space play/stop · Rec records armed automation · Ctrl+E split · Ctrl+T time · Ctrl+C/V notes or automation · Up/Down moves tracks or transposes notes · right-click menus",
                 );
             }
             if let Some(clip) = self.editor.selected_clip() {
@@ -878,8 +970,9 @@ impl eframe::App for OdawApp {
             .as_ref()
             .is_some_and(|(_, clip)| matches!(clip.content, ClipContent::Audio { .. }));
         let selected_track = self.editor.selected_track();
-        let piano_visible = self.piano_roll_open && !self.track_options_open && clip_is_midi;
-        let options_visible = self.piano_roll_open && !piano_visible;
+        if clip_is_audio && self.bottom_tab == BottomTab::Notes {
+            self.bottom_tab = BottomTab::Clip;
+        }
 
         if self.piano_roll_open {
             let panel_height = (ctx.available_rect().height() * 0.5).clamp(240.0, 620.0);
@@ -890,46 +983,42 @@ impl eframe::App for OdawApp {
                 .min_height(180.0)
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
-                        let title = if piano_visible {
-                            "Piano roll"
-                        } else if clip_is_audio && !self.track_options_open {
-                            "Audio clip"
-                        } else {
-                            "Track options"
-                        };
-                        ui.strong(title);
+                        ui.selectable_value(&mut self.bottom_tab, BottomTab::Notes, "Notes");
+                        ui.selectable_value(
+                            &mut self.bottom_tab,
+                            BottomTab::Automation,
+                            "Automation",
+                        );
+                        ui.selectable_value(&mut self.bottom_tab, BottomTab::Clip, "Clip/Track");
+                        ui.separator();
                         if ui.button("Hide panel").clicked() {
                             self.piano_roll_open = false;
                         }
-                        if clip_is_midi {
-                            if self.track_options_open {
-                                if ui.button("Piano roll").clicked() {
-                                    self.track_options_open = false;
-                                }
-                            } else if ui.button("Track options").clicked() {
-                                self.track_options_open = true;
-                            }
-                        }
                         ui.separator();
-                        if piano_visible {
-                            ui.small(
+                        match self.bottom_tab {
+                            BottomTab::Notes if clip_is_midi => ui.small(
                                 "tap to add a note · drag empty space to select · drag notes to move · right-click menu",
-                            );
-                        } else {
-                            ui.small("track mixer, colors, clip list, and audio clip details");
-                        }
+                            ),
+                            BottomTab::Notes => ui.small("select a MIDI clip, or switch to Automation"),
+                            BottomTab::Automation => ui.small(
+                                "click to add · drag points to move · marquee to select · right-click for curve and delete · Draw for freehand",
+                            ),
+                            BottomTab::Clip => {
+                                ui.small("track mixer, colors, clip list, and audio clip details")
+                            }
+                        };
                     });
-                    if piano_visible {
-                        self.piano_roll.show(ui, &mut self.editor);
-                    } else if options_visible {
-                        options::show(
+                    match self.bottom_tab {
+                        BottomTab::Notes => self.piano_roll.show(ui, &mut self.editor),
+                        BottomTab::Automation => self.automation.show(ui, &mut self.editor),
+                        BottomTab::Clip => options::show(
                             ui,
                             &mut self.editor,
                             &mut self.mixer,
                             selected_track,
                             selected_any,
                             &mut rename_request,
-                        );
+                        ),
                     }
                 });
 
@@ -958,6 +1047,10 @@ impl eframe::App for OdawApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             timeline::show(ui, &mut self.editor, &mut self.mixer, &mut self.timeline);
         });
+        if let Some(address) = self.timeline.automation_focus.take() {
+            self.bottom_tab = BottomTab::Automation;
+            self.automation.focus(address);
+        }
 
         if let Some(track) = self.timeline.rename_request.take() {
             let name = self.editor.session.project().nodes.get(&track).map_or_else(
@@ -993,6 +1086,10 @@ impl eframe::App for OdawApp {
         self.time_window(ctx);
         self.plugin_browser(ctx);
         self.service_plugin_windows();
+        if let Some(address) = self.editor.automation_focus.take() {
+            self.bottom_tab = BottomTab::Automation;
+            self.automation.focus(address);
+        }
 
         if self.editor.playing
             || self.mixer.active()

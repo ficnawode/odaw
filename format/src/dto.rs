@@ -161,6 +161,14 @@ pub struct KeyframeDto {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AutomationLaneDto {
     pub mode: AutomationModeDto,
+    pub enabled: bool,
+    pub keyframes: Vec<KeyframeDto>,
+}
+
+/// Version 4 stored lanes without an explicit enabled flag.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AutomationLaneDtoV4 {
+    pub mode: AutomationModeDto,
     pub keyframes: Vec<KeyframeDto>,
 }
 
@@ -681,6 +689,7 @@ impl From<&AutomationLane> for AutomationLaneDto {
     fn from(lane: &AutomationLane) -> Self {
         Self {
             mode: AutomationModeDto::from(lane.mode),
+            enabled: lane.enabled,
             keyframes: lane.keyframes.iter().map(KeyframeDto::from).collect(),
         }
     }
@@ -690,7 +699,18 @@ impl From<AutomationLaneDto> for AutomationLane {
     fn from(dto: AutomationLaneDto) -> Self {
         Self {
             mode: AutomationMode::from(dto.mode),
+            enabled: dto.enabled,
             keyframes: dto.keyframes.into_iter().map(Keyframe::from).collect(),
+        }
+    }
+}
+
+impl From<AutomationLaneDtoV4> for AutomationLaneDto {
+    fn from(dto: AutomationLaneDtoV4) -> Self {
+        Self {
+            mode: dto.mode,
+            enabled: true,
+            keyframes: dto.keyframes,
         }
     }
 }
@@ -948,6 +968,7 @@ mod tests {
     fn automation_lanes_round_trip() {
         let lane = AutomationLane {
             mode: AutomationMode::Trim,
+            enabled: true,
             keyframes: [
                 Keyframe {
                     tick: Tick::ZERO,

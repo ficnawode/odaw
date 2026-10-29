@@ -5,6 +5,7 @@ pub mod project_file;
 mod v1;
 mod v2;
 mod v3;
+mod v4;
 
 pub use container::{Container, ContainerError};
 pub use manifest::Manifest;

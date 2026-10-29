@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, FromSample, SampleFormat, SizedSample, StreamConfig, SupportedStreamConfig};
@@ -28,12 +28,35 @@ impl AudioBackend {
         let supported = choose_config(&device, channels, sample_rate)?;
         let sample_format = supported.sample_format();
         let config = supported.config();
+        eprintln!(
+            "audio: {:?} {} ch {} Hz",
+            sample_format, config.channels, config.sample_rate
+        );
         let error = Arc::new(AtomicBool::new(false));
+        let xruns = Arc::new(AtomicU32::new(0));
 
         let stream = match sample_format {
-            SampleFormat::F32 => build_stream::<f32>(&device, config, callback, Arc::clone(&error)),
-            SampleFormat::I16 => build_stream::<i16>(&device, config, callback, Arc::clone(&error)),
-            SampleFormat::U16 => build_stream::<u16>(&device, config, callback, Arc::clone(&error)),
+            SampleFormat::F32 => build_stream::<f32>(
+                &device,
+                config,
+                callback,
+                Arc::clone(&error),
+                Arc::clone(&xruns),
+            ),
+            SampleFormat::I16 => build_stream::<i16>(
+                &device,
+                config,
+                callback,
+                Arc::clone(&error),
+                Arc::clone(&xruns),
+            ),
+            SampleFormat::U16 => build_stream::<u16>(
+                &device,
+                config,
+                callback,
+                Arc::clone(&error),
+                Arc::clone(&xruns),
+            ),
             other => return Err(AudioError::UnsupportedSampleFormat(other)),
         }?;
         stream.play()?;
@@ -96,6 +119,7 @@ fn build_stream<T>(
     config: StreamConfig,
     mut callback: impl AudioCallback,
     error: Arc<AtomicBool>,
+    xruns: Arc<AtomicU32>,
 ) -> Result<cpal::Stream, AudioError>
 where
     T: SizedSample + FromSample<f32>,
@@ -104,13 +128,30 @@ where
     let sample_rate = config.sample_rate;
     let mut scratch = vec![0.0f32; 65_536];
     let data_error = Arc::clone(&error);
-    let error_callback = move |_error| {
+    let data_xruns = Arc::clone(&xruns);
+    let error_xruns = Arc::clone(&xruns);
+    let error_callback = move |stream_error: cpal::Error| {
+        match stream_error.kind() {
+            // One Xrun is a glitch. A long run of them without a successful
+            // callback usually means the device was suspended or rerouted;
+            // make it visible so the app can rebuild the stream.
+            cpal::ErrorKind::Xrun => {
+                let count = error_xruns.fetch_add(1, Ordering::AcqRel) + 1;
+                if count < 8 {
+                    return;
+                }
+            }
+            // A route change is handled by the backend.
+            cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied => return,
+            _ => {}
+        }
         error.store(true, Ordering::Release);
     };
 
     Ok(device.build_output_stream(
         config,
         move |data: &mut [T], _| {
+            data_xruns.store(0, Ordering::Release);
             if data.len() > scratch.len() {
                 data.fill(T::EQUILIBRIUM);
                 data_error.store(true, Ordering::Release);

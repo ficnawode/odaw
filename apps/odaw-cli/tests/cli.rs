@@ -29,7 +29,7 @@ fn new_inspect_and_validate_round_trip() {
         String::from_utf8_lossy(&inspected.stderr)
     );
     let json: serde_json::Value = serde_json::from_slice(&inspected.stdout).unwrap();
-    assert_eq!(json["format_version"], 4);
+    assert_eq!(json["format_version"], 5);
     assert_eq!(json["project"]["meta"]["name"], "demo");
     assert_eq!(json["project"]["meta"]["seed"], 9);
     assert_eq!(json["project"]["meta"]["sample_rate"], 48_000);
@@ -107,6 +107,57 @@ fn rename_goes_through_the_session_and_persists() {
     let inspected = odaw().args(["inspect", path, "--json"]).output().unwrap();
     let json: serde_json::Value = serde_json::from_slice(&inspected.stdout).unwrap();
     assert_eq!(json["project"]["meta"]["name"], "renamed");
+}
+
+#[test]
+fn automation_can_be_edited_from_the_cli() {
+    let directory = TempDir::new().unwrap();
+    let project = directory.path().join("demo.odaw");
+
+    let created = odaw()
+        .args(["demo", project.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+
+    let set = odaw()
+        .args([
+            "automation",
+            "set",
+            project.to_str().unwrap(),
+            "--node",
+            "1",
+            "--param",
+            "gain_db",
+            "--tick",
+            "0",
+            "--value",
+            "-6",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        set.status.success(),
+        "{}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+
+    let listed = odaw()
+        .args(["automation", "list", project.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&listed.stdout);
+    assert!(stdout.contains("gain_db"));
+    assert!(stdout.contains("tick 0"));
 }
 
 #[test]

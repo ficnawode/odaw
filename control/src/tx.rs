@@ -219,9 +219,7 @@ impl Tx {
                 target.automation.remove(&param);
             }
         }
-        self.changes.nodes.insert(node);
-        self.changes.params.insert(ParamAddress { node, param });
-        self.changes.structural = true;
+        self.changes.automation.insert(ParamAddress { node, param });
         true
     }
 
@@ -310,7 +308,7 @@ mod tests {
     }
 
     #[test]
-    fn automation_is_structural() {
+    fn automation_is_not_structural() {
         let mut tx = Tx::new(project());
         assert!(
             tx.set_automation(
@@ -318,6 +316,7 @@ mod tests {
                 "gain".into(),
                 Some(AutomationLane {
                     mode: AutomationMode::Absolute,
+                    enabled: true,
                     keyframes: [Keyframe {
                         tick: odaw_core::Tick::ZERO,
                         value: ParamValue::Float(0.5),
@@ -330,11 +329,20 @@ mod tests {
         );
 
         let outcome = tx.commit();
-        assert!(outcome.changes.is_structural());
-        assert!(outcome.changes.params.contains(&ParamAddress {
-            node: NodeId::from_raw(1),
-            param: "gain".into(),
-        }));
+        assert!(!outcome.changes.is_structural());
+        assert!(outcome.changes.is_automation_only());
+        assert_eq!(
+            outcome
+                .changes
+                .automation
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![ParamAddress {
+                node: NodeId::from_raw(1),
+                param: "gain".into(),
+            }]
+        );
     }
 
     #[test]

@@ -1,3 +1,4 @@
+pub mod automation;
 pub mod clip;
 pub mod collections;
 pub mod graph;
@@ -8,6 +9,7 @@ pub mod schema;
 pub mod time;
 pub mod validation;
 
+pub use automation::AutomationError;
 pub use clip::{Asset, AssetKind, Clip, ClipContent, Note, Section, SectionRef};
 pub use collections::{PersistentMap, PersistentVector};
 pub use graph::{

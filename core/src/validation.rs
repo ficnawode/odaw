@@ -1,9 +1,11 @@
 use thiserror::Error;
 
+use crate::automation::AutomationError;
 use crate::clip::{ClipContent, Note};
 use crate::collections::PersistentVector;
 use crate::graph::{NodeRole, PortDirection};
 use crate::ids::{AssetId, ClipId, EdgeId, NodeId, NoteId, PortId, SectionId};
+use crate::params::ParamId;
 use crate::project::Project;
 use crate::time::Tick;
 
@@ -77,6 +79,12 @@ pub enum ValidationError {
     MissingModulator { node: NodeId, modulator: NodeId },
     #[error("modulator link on node {node} references non-modulator {modulator}")]
     ModulatorRole { node: NodeId, modulator: NodeId },
+    #[error("automation lane {param} on node {node} is invalid: {reason}")]
+    InvalidAutomation {
+        node: NodeId,
+        param: ParamId,
+        reason: AutomationError,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
@@ -179,6 +187,7 @@ impl Project {
             }
             self.validate_node_clips(*node_id, node)?;
             self.validate_modulations(*node_id, node)?;
+            self.validate_automation(*node_id, node)?;
         }
 
         for (edge_id, edge) in &self.edges {
@@ -262,6 +271,22 @@ impl Project {
                     clip: *clip,
                 });
             }
+        }
+        Ok(())
+    }
+
+    fn validate_automation(
+        &self,
+        node_id: NodeId,
+        node: &crate::graph::Node,
+    ) -> Result<(), ValidationError> {
+        for (param, lane) in &node.automation {
+            lane.validate()
+                .map_err(|reason| ValidationError::InvalidAutomation {
+                    node: node_id,
+                    param: param.clone(),
+                    reason,
+                })?;
         }
         Ok(())
     }
